@@ -1,0 +1,11 @@
+\section{Literature}
+\label{sec:literature}
+
+\subsection{Gaussian Splatting}
+
+\noindent Gaussian splatting is a real-time radiance field rendering technique for novel-view synthesis of 3D scenes from a sparse set of 2D images \cite{kerbl20233dgaussiansplattingrealtime}. GS represents scenes as a set of ellipsoids (i.e. splats), each with their own attributes, such as position, covariance, color, and opacity. GS is a popular alternative to rendering using neural radiance fields (NeRF) due to the high training and rendering times associated with NeRF \cite{mildenhall2020nerf}. Although many variants for improving NeRF exist, 3DGS has been shown to achieve higher quality and faster rendering speed without using neural components.\\
+
+\subsection{Agentic Gaussian Splatting}
+
+\noindent Our agentic pipeline is most closely related to World Agents, which focuses on generating static 3D scenes with three VLM agents: the director, generator, and verifier agent \cite{erkoc2026worldagents}. In the first step, the director agent generates a text prompt to guide the image generator. Using the prompt, the generator builds new image views, which are then passed to a verifier agent. By evaluating the new 2D images for image quality and 3D reconstruction consistency, the verifier selects and feeds the quality images into AnySplat to produce an explorable 3DGS scene. Similar to the Director-Verifier, we aim to use an Actor-Critic pipeline to refine our 3DGS reconstruction, but without the Generator agent. While WorldAgents creates a 3DGS scene from generated 2D images, we directly use real-world video frames as our input. Additionally, our refinement loop differs: rather than evaluating the quality of 2D image inputs for a 2D generation loop, our critic evaluates the 3DGS reconstruction and provides direction for the 3DGS generation loop.
+
