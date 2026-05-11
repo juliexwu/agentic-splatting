@@ -19,3 +19,11 @@
 - modernized for CVPR 2022 by [Stefan Roth](mailto:stefan.roth@NOSPAMtu-darmstadt.de)
 - created cvpr.sty file to unify review/rebuttal/final versions by [Ming-Ming Cheng](https://github.com/MCG-NKU/CVPR_Template)
 - developed CVPR 2005 template  by [Paolo Ienne](mailto:Paolo.Ienne@di.epfl.ch) and [Andrew Fitzgibbon](mailto:awf@acm.org)
+
+# REPO SET UP GUIDE
+- Using python 3.10
+- Install uv by running `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- Run `uv sync` to install all packages
+- Run `uv run main.py` to run main.py
+- Run `uv add "package_name` to install a package
+- Make .env file and put huggingface token in like this HF_TOKEN =  
