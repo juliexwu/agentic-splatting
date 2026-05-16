@@ -30,11 +30,9 @@ def images_to_point_cloud(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Step 1: Extract SIFT features ---
-    print("[1/3] Extracting features...")
     pycolmap.extract_features(database_path, image_dir)
 
     # --- Step 2: Match features ---
-    print(f"[2/3] Matching features ({match_method})...")
     if match_method == "sequential":
         pycolmap.match_sequential(database_path)
     elif match_method == "exhaustive":
