@@ -158,7 +158,7 @@ pip install opencv-python-headless
 
 
 
-# SET UP
+# UV SET UP
 - Using python 3.10
 - Install uv by running `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - Run `uv sync` to install all packages
