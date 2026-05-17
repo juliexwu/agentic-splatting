@@ -49,8 +49,14 @@ def images_to_point_cloud(
         raise RuntimeError("Reconstruction failed — check image overlap and quality")
 
     reconstruction = maps[0]
-    reconstruction.write(output_dir)
+    sparse_dir = output_dir / "sparse" / "0"
+    sparse_dir.mkdir(parents=True, exist_ok=True)
+    reconstruction.write(sparse_dir)
     reconstruction.export_PLY(output_dir / "sparse.ply")
+
+    images_link = output_dir / "images"
+    if not images_link.exists():
+        images_link.symlink_to(image_dir.resolve())
 
     if dense:
         mvs_path.mkdir(exist_ok=True)
@@ -73,8 +79,9 @@ def run_gsplat_training(data_dir, output_dir, config_path):
         "--data_dir", str(data_dir),
         "--result_dir", str(output_dir),
         "--max_steps", str(cfg["training"]["max_steps"]),
-        "--densify_grad_threshold", str(cfg["training"]["densify_grad_threshold"]),
-        "--opacity_cull_threshold", str(cfg["training"]["opacity_cull_threshold"]),
+        "--strategy.grow_grad2d", str(cfg["training"]["densify_grad_threshold"]),
+        "--strategy.prune_opa", str(cfg["training"]["opacity_cull_threshold"]),
+        "--data_factor", "1",
         "--disable_viewer", # Kept headless for the autonomous pipeline
         "--save_ply"
     ]
@@ -196,7 +203,7 @@ def mock_actor_agent_rewrite(vlm_feedback, config_path):
 
 
 if __name__ == "__main__":
-    input_video = "input/zoo.mp4"
+    # input_video = "input/zoo.mp4"
     colmap_out_dir = "output"
     gsplat_result_dir = "output/splat_results"
     agent_config_file = "output/config.yaml"
@@ -215,8 +222,10 @@ if __name__ == "__main__":
         output_dir="output",
         match_method="sequential",
         dense=False,
+        use_gpu=False,  # pycolmap's COLMAP feature extractor needs either CUDA 
+                        # compiled w/ COLMAP support or OpenGL context —
+                        # neither is available in a headless/terminal env even if your GPU has CUDA for PyTorch. CPU extraction is slower but works fine for this pipeline.
     )
-
 
     # pcd = o3d.io.read_point_cloud("output/sparse.ply")
     # o3d.visualization.draw_geometries([pcd])
@@ -233,7 +242,7 @@ if __name__ == "__main__":
         yaml.dump(initial_config, f)
 
     # 3: Main VLM Optimization Loop
-    MAX_LOOP_ATTEMPTS = 5
+    MAX_LOOP_ATTEMPTS = 3
     loop_iter = 1
     pipeline_converged = False
 
