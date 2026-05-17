@@ -3,7 +3,7 @@
  Multi-agent pipeline for video-to-3D Gaussian Splatting. A **Critic agent** (VLM) evaluates 2D rendered output and feeds structured visual feedback to an **Actor agent** (LLM coder) that rewrites the GS training hyperparameter config — looping until convergence.
 
 ```
-Video → Frames → COLMAP (sparse reconstruct) → gsplat training → VLM Critic → Actor rewrite → repeat
+Video → Frames → COLMAP (sparse reconstruct) → gsplat training → VLM Critic → Actor/Coder rewrite → repeat
 ```
 
 
