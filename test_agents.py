@@ -2,11 +2,51 @@ import ffmpeg
 import pathlib
 import pycolmap
 import open3d as o3d
-
+import os
+import torch
+import ffmpeg
+import pathlib
+import pycolmap
 import subprocess
 import yaml
 import torch
+import argparse
+
 from gsplat.rendering import rasterization
+from typing import TypedDict
+from langgraph.graph import StateGraph, END
+from transformers import pipeline as hf_pipeline
+from dotenv import load_dotenv
+from huggingface_hub import login
+
+# Change this to any huggingface model
+load_dotenv()
+login(token=os.getenv("HF_TOKEN"))
+MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+llm = hf_pipeline(
+    "text-generation",
+    model=MODEL,
+)
+
+
+# This is where we choose what information comes in and out of the agents
+class State(TypedDict):
+    feedback: str
+    approved: bool
+    iteration: int
+    video_name: str
+    video_path: str
+    initial_point_cloud_path: str
+    input_mode: int
+
+
+def call_llm(prompt: str) -> str:
+    messages = [{"role": "user", "content": prompt}]
+    out = llm(messages)
+    return out[0]["generated_text"][-1]["content"].strip()
 
 
 def extract_frames(video_path, output_dir, fps=2):
@@ -50,14 +90,8 @@ def images_to_point_cloud(
         raise RuntimeError("Reconstruction failed — check image overlap and quality")
 
     reconstruction = maps[0]
-    sparse_dir = output_dir / "sparse" / "0"
-    sparse_dir.mkdir(parents=True, exist_ok=True)
-    reconstruction.write(sparse_dir)
+    reconstruction.write(output_dir)
     reconstruction.export_PLY(output_dir / "sparse.ply")
-
-    images_link = output_dir / "images"
-    if not images_link.exists():
-        images_link.symlink_to(image_dir.resolve())
 
     if dense:
         mvs_path.mkdir(exist_ok=True)
@@ -217,33 +251,100 @@ def mock_actor_agent_rewrite(vlm_feedback, config_path):
 #     return response.text
 
 
+# Agents go here
+def prefiltering_agent(state: State) -> State:
+    print("Prefiltering Agent running...")
+    image_dir = f"images/{state['video_name']}"
+    output_dir = f"output/{state['video_name']}"
+    
+    if state["input_mode"] == 0:
+        extract_frames(state["video_path"], image_dir)
+
+        images_to_point_cloud(
+            image_dir=image_dir,
+            output_dir=output_dir,
+            match_method="sequential",
+            dense=False,
+        )
+
+    else:
+        images_to_point_cloud(
+            image_dir=image_dir,
+            output_dir=output_dir,
+            match_method="sequential",
+            dense=False,
+        )
+
+    return {**state, "initial_point_cloud_path": output_dir}
+
+
+def actor_agent(state: State) -> State:
+    return {**state, "improved_story": result}
+
+
+def critic_agent(state: State) -> State:
+    return {
+        **state,
+        "feedback": feedback,
+        "approved": approved,
+        "iteration": state["iteration"] + 1,
+    }
+
+
+# Put termination here
+def route(state: State) -> str:
+    if state["approved"] or state["iteration"] >= 3:
+        return "end"
+    return "actor_agent"
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="3D Gaussian Splatting Pipeline")
+    parser.add_argument(
+        "--mode",
+        type=int,
+        required=True,
+        choices=[0, 1],
+        help="0 for video, 1 for images",
+    )
+    args = parser.parse_args()
+
+    # This creates the langgraph graph and runs the agentic loop
+    graph = StateGraph(State)
+    graph.add_node("prefiltering_agent", prefiltering_agent)
+    graph.add_node("actor_agent", actor_agent)
+    graph.add_node("critic_agent", critic_agent)
+
+    graph.set_entry_point("prefiltering_agent")
+    graph.add_edge("prefiltering_agent", "actor_agent")
+    graph.add_edge("actor_agent", "critic_agent")
+    graph.add_conditional_edges(
+        "critic_agent",
+        route,
+        {
+            "actor_agent": "actor_agent",
+            "end": END,
+        },
+    )
+
+    pipeline = graph.compile()
+
     # input_video = "input/zoo.mp4"
     colmap_out_dir = "output"
     gsplat_result_dir = "output/splat_results"
     agent_config_file = "output/config.yaml"
 
-    # Uncomment if you have an input_video that you want to parse to frames
-    # extract_frames(input_video, "input/images")
-    # exit(0)
-
-    pathlib.Path(colmap_out_dir).mkdir(parents=True, exist_ok=True)
-
-    img_dir = "input/images"
-    # # 1. Preprocessing frames to sparse COLMAP, only run once on your dataset
-    print("Step 1: Generating camera poses and sparse structure from images")
-    reconstruction = images_to_point_cloud(
-        image_dir=img_dir,
-        output_dir="output",
-        match_method="sequential",
-        dense=False,
-        use_gpu=True,  # pycolmap's COLMAP feature extractor needs either CUDA
-        # compiled w/ COLMAP support or OpenGL context —
-        # neither is available in a headless/terminal env even if your GPU has CUDA for PyTorch. CPU extraction is slower but works fine for this pipeline.
+    result = pipeline.invoke(
+        {
+            "feedback": "",
+            "approved": False,
+            "iteration": 0,
+            "video_path": "video.mp4",
+            "video_name": "bushes",
+            "agent_config_file": "",
+            "input_mode": args.mode,
+        }
     )
-
-    # pcd = o3d.io.read_point_cloud("output/sparse.ply")
-    # o3d.visualization.draw_geometries([pcd])
 
     # 2: Initialize Baseline Config to start
     initial_config = {
