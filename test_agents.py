@@ -16,7 +16,7 @@ from huggingface_hub import InferenceClient
 load_dotenv()
 
 # instruct necessary for following yaml str?
-ACTOR_MODEL = "Qwen/Qwen2.5-7B-Instruct"    # switch to stronger models later
+ACTOR_MODEL = "Qwen/Qwen2.5-7B-Instruct"  # switch to stronger models later
 # ACTOR_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 CRITIC_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
@@ -47,11 +47,14 @@ def call_llm(prompt: str) -> str:
 
 def call_vlm(prompt: str, image_paths: list[str]) -> str:
     import base64
+
     content = []
     for path in image_paths:
         with open(path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
-        content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+        content.append(
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+        )
     content.append({"type": "text", "text": prompt})
     response = critic_client.chat.completions.create(
         messages=[{"role": "user", "content": content}],
@@ -60,7 +63,7 @@ def call_vlm(prompt: str, image_paths: list[str]) -> str:
     return response.choices[0].message.content.strip()
 
 
-#### TODO: need to implement rasterization to turn GS to 2d novel view imgs 
+#### TODO: need to implement rasterization to turn GS to 2d novel view imgs
 def get_render_images(result_dir: str, max_images: int = 4) -> list[str]:
     result_dir = pathlib.Path(result_dir)
     for subdir in [result_dir / "renders", result_dir]:
@@ -75,7 +78,9 @@ def extract_frames(video_path, output_dir, fps=2):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     (
-        ffmpeg.input(str(video_path))
+        ffmpeg.input(str(video_path), hwaccel="cuda", hwaccel_output_format="cuda")
+        .filter("hwdownload")
+        .filter("format", "nv12")
         .filter("fps", fps=fps)
         .output(str(output_dir / "frame_%05d.jpg"), **{"q:v": 2})
         .run(overwrite_output=True)
@@ -95,13 +100,13 @@ def images_to_point_cloud(
     mvs_path = output_dir / "mvs"
     output_dir.mkdir(parents=True, exist_ok=True)
     if database_path.exists():
-        database_path.unlink() # delete old db
+        database_path.unlink()  # delete old db
 
     device = pycolmap.Device.cuda if use_gpu else pycolmap.Device.cpu
 
     try:
         pycolmap.extract_features(database_path, image_dir, device=device)
-    except ValueError: 
+    except ValueError:
         print("[!] CUDA SIFT unavailable, retrying on CPU.")
         device = pycolmap.Device.cpu
         pycolmap.extract_features(database_path, image_dir, device=device)
@@ -262,7 +267,7 @@ def prefiltering_agent(state: State) -> State:
     print("Prefiltering Agent running...")
     output_dir = f"output/{state['video_name']}"
     image_dir = f"{output_dir}/images"
-    
+
     if state["input_mode"] == 0:
         extract_frames(state["video_path"], image_dir)
 
@@ -285,7 +290,9 @@ def prefiltering_agent(state: State) -> State:
 
 
 def actor_agent(state: State) -> State:
-    print(f"[Actor Agent] Iteration {state['iteration']} - updating config and launching training...")
+    print(
+        f"[Actor Agent] Iteration {state['iteration']} - updating config and launching training..."
+    )
     config_path = state["config_path"]
 
     if state["iteration"] == 0 or not os.path.exists(config_path):
@@ -321,7 +328,9 @@ def actor_agent(state: State) -> State:
             if isinstance(parsed, dict) and "training" in parsed:
                 cfg = parsed
             else:
-                print("[Actor] LLM response missing 'training' key, keeping current config.")
+                print(
+                    "[Actor] LLM response missing 'training' key, keeping current config."
+                )
         except yaml.YAMLError:
             print("[Actor] Failed to parse LLM YAML response, keeping current config.")
 
@@ -341,9 +350,11 @@ def actor_agent(state: State) -> State:
 def critic_agent(state: State) -> State:
     print(f"[Critic Agent] Evaluating results from iteration {state['iteration']}...")
     metrics = extract_eval_metrics(state["result_dir"])
-    print(f"[+] Metrics: PSNR={metrics['psnr']}, SSIM={metrics['ssim']}, LPIPS={metrics['lpips']}")
+    print(
+        f"[+] Metrics: PSNR={metrics['psnr']}, SSIM={metrics['ssim']}, LPIPS={metrics['lpips']}"
+    )
 
-    image_paths = get_render_images(state["result_dir"]) # TODO: 
+    image_paths = get_render_images(state["result_dir"])  # TODO:
     print(f"[+] Found {len(image_paths)} render(s) for visual evaluation.")
 
     prompt = (
@@ -363,7 +374,9 @@ def critic_agent(state: State) -> State:
     if image_paths:
         response = call_vlm(prompt, image_paths)
     else:
-        print("[Critic] No render images found, falling back to metrics-only evaluation.")
+        print(
+            "[Critic] No render images found, falling back to metrics-only evaluation."
+        )
         response = call_llm(prompt)
 
     approved = "STATUS: ACCEPTED" in response
@@ -419,8 +432,8 @@ if __name__ == "__main__":
             "feedback": "",
             "approved": False,
             "iteration": 0,
-            "video_path": "input/zoo.mp4",
-            "video_name": "zoo",
+            "video_path": "input/video.mp4",
+            "video_name": "video",
             "initial_point_cloud_path": "",
             "config_path": "output/config.yaml",
             "result_dir": "output/splat_results",
@@ -428,7 +441,7 @@ if __name__ == "__main__":
         }
     )
 
-    exit(0) ### remove if you want to view 
+    exit(0)  ### remove if you want to view
     print("\n[+] Launching interactive viewer for final output...")
     colmap_out_dir = f"output/{result['video_name']}"
     pcd = o3d.io.read_point_cloud(f"{colmap_out_dir}/sparse.ply")

@@ -9,7 +9,9 @@ def extract_frames(video_path, output_dir, fps=2):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     (
-        ffmpeg.input(str(video_path))
+        ffmpeg.input(str(video_path), hwaccel="cuda", hwaccel_output_format="cuda")
+        .filter("hwdownload")
+        .filter("format", "nv12")
         .filter("fps", fps=fps)
         .output(str(output_dir / "frame_%05d.jpg"), **{"q:v": 2})
         .run(overwrite_output=True)
@@ -60,7 +62,7 @@ def images_to_point_cloud(
 if __name__ == "__main__":
     input = "video.mp4"
     output = "input/test"
-    # extract_frames(input, output)
+    extract_frames(input, output)
 
     """
     reconstruction = images_to_point_cloud(
