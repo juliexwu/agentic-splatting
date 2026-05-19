@@ -23,6 +23,11 @@ conda create -n 252splat python=3.10 -y
 conda activate 252splat
 ```
 
+On UCSD DSMLP, the following may be necessary:
+```bash
+python3.10 -m ensurepip --default-pip
+```
+
 ### 3. Install CUDA toolkit into the environment
 
 - Match to the CUDA version your PyTorch build expects. Check with `nvcc --version` and cross-reference [PyTorch's compatibility table](https://pytorch.org/get-started/locally/).
@@ -44,6 +49,12 @@ Install the version matching your CUDA toolkit:
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 ```
 
+On DSMLP, this may be necessary instead of the above:
+```bash
+# Example for CUDA 12.4:
+python3.10 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+```
+
 ### 5. Install gcc 13
 ```bash
 conda install -c conda-forge gcc=13 gxx=13 -n 252splat --force-reinstall
@@ -51,6 +62,11 @@ git submodule update --init --recursive
 export CUDAHOSTCXX=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++
 export CC=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcc
 export CXX=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++
+```
+
+On DSMLP, replace the first line with:
+```bash
+conda install -c conda-forge gcc=12 gxx=12 -n 252splat --force-reinstall
 ```
 
 ### 6. Clone and build gsplat locally
@@ -61,6 +77,10 @@ export CXX=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++
 git clone https://github.com/nytseng/gsplat.git # fork bc update to pycolmap SceneManager
 cd gsplat && pip install . --no-build-isolation --no-cache-dir
 cd ..
+```
+On DSMLP, the second line may need to be replaced with:
+```bash
+cd gsplat && python3.10 -m pip install . --no-build-isolation --no-cache-dir
 ```
 
 Verify the build succeeded:
@@ -75,6 +95,11 @@ Note: requirements.txt is for cu12 which is compatible with cu12.x
 
 ```bash
 pip install --no-build-isolation -r requirements.txt
+```
+
+On DSMLP, this worked better instead:
+```bash
+python3.10 -m pip install --no-build-isolation -r requirements_dsmlp.txt
 ```
 
 ---
