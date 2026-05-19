@@ -15,8 +15,9 @@ from huggingface_hub import InferenceClient
 
 load_dotenv()
 
-# instruct necessary for following yaml str
-ACTOR_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct" 
+# instruct necessary for following yaml str?
+ACTOR_MODEL = "Qwen/Qwen2.5-7B-Instruct"    # switch to stronger models later
+# ACTOR_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 CRITIC_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
 actor_client = InferenceClient(model=ACTOR_MODEL, token=os.getenv("HF_TOKEN"))
@@ -112,12 +113,13 @@ def images_to_point_cloud(
     else:
         raise ValueError("match_method must be 'sequential' or 'exhaustive'")
 
-    maps = pycolmap.incremental_mapping(database_path, image_dir, output_dir)
+    sparse_dir = output_dir / "sparse"
+    sparse_dir.mkdir(exist_ok=True)
+    maps = pycolmap.incremental_mapping(database_path, image_dir, sparse_dir)
     if not maps:
         raise RuntimeError("Reconstruction failed — check image overlap and quality")
 
     reconstruction = maps[0]
-    reconstruction.write(output_dir)
     reconstruction.export_PLY(output_dir / "sparse.ply")
 
     if dense:
@@ -258,8 +260,8 @@ def mock_actor_agent_rewrite(vlm_feedback, config_path):
 
 def prefiltering_agent(state: State) -> State:
     print("Prefiltering Agent running...")
-    image_dir = f"input/images/{state['video_name']}"
     output_dir = f"output/{state['video_name']}"
+    image_dir = f"{output_dir}/images"
     
     if state["input_mode"] == 0:
         extract_frames(state["video_path"], image_dir)
@@ -417,8 +419,8 @@ if __name__ == "__main__":
             "feedback": "",
             "approved": False,
             "iteration": 0,
-            "video_path": "input/video.mp4",
-            "video_name": "video",
+            "video_path": "input/zoo.mp4",
+            "video_name": "zoo",
             "initial_point_cloud_path": "",
             "config_path": "output/config.yaml",
             "result_dir": "output/splat_results",
