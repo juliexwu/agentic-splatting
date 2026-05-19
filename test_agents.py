@@ -8,6 +8,7 @@ import yaml
 import torch
 from gsplat.rendering import rasterization
 
+
 def extract_frames(video_path, output_dir, fps=2):
     output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -66,26 +67,36 @@ def images_to_point_cloud(
 
     return reconstruction
 
+
 # Multi-agent gsplat pipeline
+
 
 def run_gsplat_training(data_dir, output_dir, config_path):
     # 1. Load config/hyperparameters written by your Coder Agent
-    with open(config_path, 'r') as f:
+    with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
-        
+
     # 2. Build the command-line argument array dynamically
     cmd = [
-        "python", "gsplat/examples/simple_trainer.py", "default",
-        "--data_dir", str(data_dir),
-        "--result_dir", str(output_dir),
-        "--max_steps", str(cfg["training"]["max_steps"]),
-        "--strategy.grow_grad2d", str(cfg["training"]["densify_grad_threshold"]),
-        "--strategy.prune_opa", str(cfg["training"]["opacity_cull_threshold"]),
-        "--data_factor", "1",
-        "--disable_viewer", # Kept headless for the autonomous pipeline
-        "--save_ply"
+        "python",
+        "gsplat/examples/simple_trainer.py",
+        "default",
+        "--data_dir",
+        str(data_dir),
+        "--result_dir",
+        str(output_dir),
+        "--max_steps",
+        str(cfg["training"]["max_steps"]),
+        "--strategy.grow_grad2d",
+        str(cfg["training"]["densify_grad_threshold"]),
+        "--strategy.prune_opa",
+        str(cfg["training"]["opacity_cull_threshold"]),
+        "--data_factor",
+        "1",
+        "--disable_viewer",  # Kept headless for the autonomous pipeline
+        "--save_ply",
     ]
-    
+
     print("Starting gsplat training with agent configs...")
     subprocess.run(cmd, check=True)
 
@@ -108,27 +119,27 @@ def mock_vlm_critic(metrics, current_loop_iteration):
     rendering errors and feeds specific structural critiques back to the Actor.
     """
     print("[+] Packaging diagnostic frames and metrics for VLM Critic evaluation...")
-    
+
     # Hardcoded simulation behavior matching typical VLM visual assertions
     if current_loop_iteration == 1:
         feedback = {
             "status": "REJECTED",
             "critique": "The scene contains heavy floating cloud artifacts in the background. Texture sharpness is adequate, but structural borders are muddy.",
-            "recommendation": "Increase the opacity_cull_threshold to clean out background fog, and slightly lower the densify_grad_threshold."
+            "recommendation": "Increase the opacity_cull_threshold to clean out background fog, and slightly lower the densify_grad_threshold.",
         }
     elif current_loop_iteration == 2:
         feedback = {
             "status": "REJECTED",
             "critique": "Background clouding has drastically improved. However, complex central surface details are blurry.",
-            "recommendation": "Lower your densify_grad_threshold further to encourage tighter geometric splits, and extend max_steps."
+            "recommendation": "Lower your densify_grad_threshold further to encourage tighter geometric splits, and extend max_steps.",
         }
     else:
         feedback = {
             "status": "ACCEPTED",
             "critique": "Visual elements are sharp and clean. Background floaters have been culled successfully. Convergence reached.",
-            "recommendation": "None"
+            "recommendation": "None",
         }
-    
+
     return feedback
 
 
@@ -138,18 +149,22 @@ def mock_actor_agent_rewrite(vlm_feedback, config_path):
     and rewriting the hyperparameter config file safely.
     """
     print(f"[+] Actor Agent is parsing feedback and updating config file properties...")
-    
+
     # Read current configuration
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
 
     rec = vlm_feedback["recommendation"]
-    
+
     # Rule-engine fallback simulating the logical parameter adjustment
     if "opacity_cull_threshold" in rec:
-        cfg["training"]["opacity_cull_threshold"] = round(cfg["training"]["opacity_cull_threshold"] + 0.02, 3)
+        cfg["training"]["opacity_cull_threshold"] = round(
+            cfg["training"]["opacity_cull_threshold"] + 0.02, 3
+        )
     if "densify_grad_threshold" in rec:
-        cfg["training"]["densify_grad_threshold"] = round(cfg["training"]["densify_grad_threshold"] - 0.00005, 5)
+        cfg["training"]["densify_grad_threshold"] = round(
+            cfg["training"]["densify_grad_threshold"] - 0.00005, 5
+        )
     if "extend max_steps" in rec:
         cfg["training"]["max_steps"] += 2000
 
@@ -161,10 +176,10 @@ def mock_actor_agent_rewrite(vlm_feedback, config_path):
 # def render_diagnostic_views(checkpoint_path, output_image_dir):
 #     # Load the trained gaussian parameters (xyz, opacities, scales, shs)
 #     ckpt = torch.load(checkpoint_path)
-    
+
 #     # Define a set of camera paths (e.g., 4 cardinal directions + 1 nadir overhead view)
-#     diagnostic_cameras = generate_eval_cameras() 
-    
+#     diagnostic_cameras = generate_eval_cameras()
+
 #     for idx, camera in enumerate(diagnostic_cameras):
 #         # Render the novel viewpoint using gsplat's rapid rasterizer
 #         render_results = rasterization(
@@ -186,17 +201,17 @@ def mock_actor_agent_rewrite(vlm_feedback, config_path):
 #     prompt = """
 #     You are an expert Machine Learning Critic specializing in 3D Gaussian Splatting.
 #     Analyze these rendered novel viewpoints from our latest training run.
-    
+
 #     Look specifically for:
 #     1. Floaters/Clouding (Foggy artifacts in unpopulated space)
 #     2. Blurring (Loss of fine high-frequency details on surfaces)
 #     3. Anisotropic stretching (Ugly spike-shaped/needle Gaussians)
-    
+
 #     The current hyperparameters were: {current_config}
-    
+
 #     Provide your technical feedback and explicitly dictate which parameters the Coder Agent should increase or decrease in the next run.
 #     """
-    
+
 #     # Combine the images + prompt payload and send to your VLM API client
 #     response = vlm_client.generate(prompt=prompt, images=image_paths)
 #     return response.text
@@ -222,9 +237,9 @@ if __name__ == "__main__":
         output_dir="output",
         match_method="sequential",
         dense=False,
-        use_gpu=False,  # pycolmap's COLMAP feature extractor needs either CUDA 
-                        # compiled w/ COLMAP support or OpenGL context —
-                        # neither is available in a headless/terminal env even if your GPU has CUDA for PyTorch. CPU extraction is slower but works fine for this pipeline.
+        use_gpu=True,  # pycolmap's COLMAP feature extractor needs either CUDA
+        # compiled w/ COLMAP support or OpenGL context —
+        # neither is available in a headless/terminal env even if your GPU has CUDA for PyTorch. CPU extraction is slower but works fine for this pipeline.
     )
 
     # pcd = o3d.io.read_point_cloud("output/sparse.ply")
@@ -233,9 +248,9 @@ if __name__ == "__main__":
     # 2: Initialize Baseline Config to start
     initial_config = {
         "training": {
-            "max_steps": 2000,                  # use low for fast test iters
-            "densify_grad_threshold": 0.0002,   # Baseline standard
-            "opacity_cull_threshold": 0.05,     # Baseline standard
+            "max_steps": 2000,  # use low for fast test iters
+            "densify_grad_threshold": 0.0002,  # Baseline standard
+            "opacity_cull_threshold": 0.05,  # Baseline standard
         }
     }
     with open(agent_config_file, "w") as f:
@@ -255,22 +270,28 @@ if __name__ == "__main__":
 
         # A. Train model using the current agent-managed config parameters
         run_gsplat_training(
-            data_dir=colmap_out_dir, 
-            output_dir=gsplat_result_dir, 
-            config_path=agent_config_file
+            data_dir=colmap_out_dir,
+            output_dir=gsplat_result_dir,
+            config_path=agent_config_file,
         )
 
         # B. Gather evaluation data and structural rendering metrics
         metrics = extract_eval_metrics(gsplat_result_dir)
-        print(f"[+] Iteration metrics captured -> PSNR: {metrics['psnr']}, SSIM: {metrics['ssim']}")
+        print(
+            f"[+] Iteration metrics captured -> PSNR: {metrics['psnr']}, SSIM: {metrics['ssim']}"
+        )
 
         # C. Pass data payload to VLM Critic for audit assessment
         feedback = mock_vlm_critic(metrics, loop_iter)
-        print(f"[VLM CRITIC STATUS]: {feedback['status']}\nCritique: {feedback['critique']}")
+        print(
+            f"[VLM CRITIC STATUS]: {feedback['status']}\nCritique: {feedback['critique']}"
+        )
 
         # D. Evaluate completion state
         if feedback["status"] == "ACCEPTED":
-            print(f"\n[✔] Success! The VLM Critic is fully satisfied with the rendering output quality.")
+            print(
+                f"\n[✔] Success! The VLM Critic is fully satisfied with the rendering output quality."
+            )
             pipeline_converged = True
         else:
             # E. Loop hasn't met quality conditions yet. Trigger Actor adjustment rewrite
@@ -278,9 +299,13 @@ if __name__ == "__main__":
             loop_iter += 1
 
     if not pipeline_converged:
-        print("\n[!] Pipeline ended due to reaching max iteration limit without explicit VLM convergence.")
+        print(
+            "\n[!] Pipeline ended due to reaching max iteration limit without explicit VLM convergence."
+        )
 
     # --- Step 4: Final Scene Inspection Render ---
-    print("\n[+] Launching local interactive viewer to inspect final output mesh structures...")
+    print(
+        "\n[+] Launching local interactive viewer to inspect final output mesh structures..."
+    )
     pcd = o3d.io.read_point_cloud(f"{colmap_out_dir}/sparse.ply")
     o3d.visualization.draw_geometries([pcd])
