@@ -93,6 +93,8 @@ def images_to_point_cloud(
     database_path = output_dir / "database.db"
     mvs_path = output_dir / "mvs"
     output_dir.mkdir(parents=True, exist_ok=True)
+    if database_path.exists():
+        database_path.unlink() # delete old db
 
     device = pycolmap.Device.cuda if use_gpu else pycolmap.Device.cpu
 
