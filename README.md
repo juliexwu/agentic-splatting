@@ -100,6 +100,15 @@ pip install --no-build-isolation -r requirements.txt
 On DSMLP, this worked better instead:
 ```bash
 python3.10 -m pip install --no-build-isolation -r requirements_dsmlp.txt
+
+# To get Open3D to work:
+# for libX11.so.6:
+conda install -c conda-forge xorg-libx11
+# for libGL.so.1:
+conda install -c conda-forge xorg-libxext xorg-libxrender
+conda install -c conda-forge freeglut
+
+conda install -c conda-forge ffmpeg
 ```
 
 ---
