@@ -3,33 +3,24 @@ import pathlib
 import pycolmap
 import open3d as o3d
 import os
-import torch
-import ffmpeg
-import pathlib
-import pycolmap
 import subprocess
 import yaml
-import torch
 import argparse
 
 from gsplat.rendering import rasterization
 from typing import TypedDict
 from langgraph.graph import StateGraph, END
-from transformers import pipeline as hf_pipeline
 from dotenv import load_dotenv
-from huggingface_hub import login
+from huggingface_hub import InferenceClient
 
-# Change this to any huggingface model
 load_dotenv()
-login(token=os.getenv("HF_TOKEN"))
-MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# instruct necessary for following yaml str
+ACTOR_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct" 
+CRITIC_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-llm = hf_pipeline(
-    "text-generation",
-    model=MODEL,
-)
+actor_client = InferenceClient(model=ACTOR_MODEL, token=os.getenv("HF_TOKEN"))
+critic_client = InferenceClient(model=CRITIC_MODEL, token=os.getenv("HF_TOKEN"))
 
 
 # This is where we choose what information comes in and out of the agents
@@ -40,13 +31,42 @@ class State(TypedDict):
     video_name: str
     video_path: str
     initial_point_cloud_path: str
+    config_path: str
+    result_dir: str
     input_mode: int
 
 
 def call_llm(prompt: str) -> str:
-    messages = [{"role": "user", "content": prompt}]
-    out = llm(messages)
-    return out[0]["generated_text"][-1]["content"].strip()
+    response = actor_client.chat.completions.create(
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=512,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def call_vlm(prompt: str, image_paths: list[str]) -> str:
+    import base64
+    content = []
+    for path in image_paths:
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+    content.append({"type": "text", "text": prompt})
+    response = critic_client.chat.completions.create(
+        messages=[{"role": "user", "content": content}],
+        max_tokens=256,
+    )
+    return response.choices[0].message.content.strip()
+
+
+#### TODO: need to implement rasterization to turn GS to 2d novel view imgs 
+def get_render_images(result_dir: str, max_images: int = 4) -> list[str]:
+    result_dir = pathlib.Path(result_dir)
+    for subdir in [result_dir / "renders", result_dir]:
+        images = sorted(subdir.glob("*.png"))[:max_images]
+        if images:
+            return [str(p) for p in images]
+    return []
 
 
 def extract_frames(video_path, output_dir, fps=2):
@@ -76,7 +96,12 @@ def images_to_point_cloud(
 
     device = pycolmap.Device.cuda if use_gpu else pycolmap.Device.cpu
 
-    pycolmap.extract_features(database_path, image_dir, device=device)
+    try:
+        pycolmap.extract_features(database_path, image_dir, device=device)
+    except ValueError: 
+        print("[!] CUDA SIFT unavailable, retrying on CPU.")
+        device = pycolmap.Device.cpu
+        pycolmap.extract_features(database_path, image_dir, device=device)
 
     if match_method == "sequential":
         pycolmap.match_sequential(database_path, device=device)
@@ -103,8 +128,6 @@ def images_to_point_cloud(
 
 
 # Multi-agent gsplat pipeline
-
-
 def run_gsplat_training(data_dir, output_dir, config_path):
     # 1. Load config/hyperparameters written by your Coder Agent
     with open(config_path, "r") as f:
@@ -231,30 +254,9 @@ def mock_actor_agent_rewrite(vlm_feedback, config_path):
 #         save_image(render_results["image"], f"{output_image_dir}/eval_view_{idx}.png")
 
 
-# def call_critic(image_paths, current_config):
-#     prompt = """
-#     You are an expert Machine Learning Critic specializing in 3D Gaussian Splatting.
-#     Analyze these rendered novel viewpoints from our latest training run.
-
-#     Look specifically for:
-#     1. Floaters/Clouding (Foggy artifacts in unpopulated space)
-#     2. Blurring (Loss of fine high-frequency details on surfaces)
-#     3. Anisotropic stretching (Ugly spike-shaped/needle Gaussians)
-
-#     The current hyperparameters were: {current_config}
-
-#     Provide your technical feedback and explicitly dictate which parameters the Coder Agent should increase or decrease in the next run.
-#     """
-
-#     # Combine the images + prompt payload and send to your VLM API client
-#     response = vlm_client.generate(prompt=prompt, images=image_paths)
-#     return response.text
-
-
-# Agents go here
 def prefiltering_agent(state: State) -> State:
     print("Prefiltering Agent running...")
-    image_dir = f"images/{state['video_name']}"
+    image_dir = f"input/images/{state['video_name']}"
     output_dir = f"output/{state['video_name']}"
     
     if state["input_mode"] == 0:
@@ -279,13 +281,93 @@ def prefiltering_agent(state: State) -> State:
 
 
 def actor_agent(state: State) -> State:
-    return {**state, "improved_story": result}
+    print(f"[Actor Agent] Iteration {state['iteration']} - updating config and launching training...")
+    config_path = state["config_path"]
+
+    if state["iteration"] == 0 or not os.path.exists(config_path):
+        cfg = {
+            "training": {
+                "max_steps": 2000,
+                "densify_grad_threshold": 0.0002,
+                "opacity_cull_threshold": 0.05,
+            }
+        }
+    else:
+        with open(config_path, "r") as f:
+            cfg = yaml.safe_load(f)
+        current_config_str = yaml.dump(cfg)
+
+        prompt = (
+            "You are an expert ML Engineer specializing in 3D Gaussian Splatting.\n"
+            "A visual critic has reviewed the latest render and provided this feedback:\n\n"
+            f"{state['feedback']}\n\n"
+            "Current training config:\n"
+            f"{current_config_str}\n"
+            "Rewrite the config YAML with adjusted hyperparameters to address the critique.\n"
+            "Reply with ONLY valid YAML in the exact same structure. No explanation.\n"
+            "training:\n"
+            "  max_steps: <int>\n"
+            "  densify_grad_threshold: <float>\n"
+            "  opacity_cull_threshold: <float>"
+        )
+
+        response = call_llm(prompt)
+        try:
+            parsed = yaml.safe_load(response)
+            if isinstance(parsed, dict) and "training" in parsed:
+                cfg = parsed
+            else:
+                print("[Actor] LLM response missing 'training' key, keeping current config.")
+        except yaml.YAMLError:
+            print("[Actor] Failed to parse LLM YAML response, keeping current config.")
+
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w") as f:
+        yaml.dump(cfg, f)
+
+    run_gsplat_training(
+        data_dir=state["initial_point_cloud_path"],
+        output_dir=state["result_dir"],
+        config_path=config_path,
+    )
+
+    return {**state}
 
 
 def critic_agent(state: State) -> State:
+    print(f"[Critic Agent] Evaluating results from iteration {state['iteration']}...")
+    metrics = extract_eval_metrics(state["result_dir"])
+    print(f"[+] Metrics: PSNR={metrics['psnr']}, SSIM={metrics['ssim']}, LPIPS={metrics['lpips']}")
+
+    image_paths = get_render_images(state["result_dir"]) # TODO: 
+    print(f"[+] Found {len(image_paths)} render(s) for visual evaluation.")
+
+    prompt = (
+        "You are an expert Machine Learning Critic specializing in 3D Gaussian Splatting.\n"
+        "Analyze the rendered novel viewpoints above alongside these training metrics:\n\n"
+        f"PSNR: {metrics['psnr']}, SSIM: {metrics['ssim']}, LPIPS: {metrics['lpips']}\n\n"
+        "Look specifically for:\n"
+        "1. Floaters / clouding (foggy artifacts in empty space)\n"
+        "2. Blurring (loss of fine surface detail)\n"
+        "3. Anisotropic stretching (needle-shaped Gaussians)\n\n"
+        "Reply in exactly this format:\n"
+        "STATUS: ACCEPTED or REJECTED\n"
+        "CRITIQUE: <one sentence assessment>\n"
+        "RECOMMENDATION: <specific hyperparameter adjustments if REJECTED, else None>"
+    )
+
+    if image_paths:
+        response = call_vlm(prompt, image_paths)
+    else:
+        print("[Critic] No render images found, falling back to metrics-only evaluation.")
+        response = call_llm(prompt)
+
+    approved = "STATUS: ACCEPTED" in response
+    print(f"[Critic]: {response}")
+
     return {
         **state,
-        "feedback": feedback,
+        "feedback": response,
         "approved": approved,
         "iteration": state["iteration"] + 1,
     }
@@ -309,7 +391,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # This creates the langgraph graph and runs the agentic loop
     graph = StateGraph(State)
     graph.add_node("prefiltering_agent", prefiltering_agent)
     graph.add_node("actor_agent", actor_agent)
@@ -329,84 +410,22 @@ if __name__ == "__main__":
 
     pipeline = graph.compile()
 
-    # input_video = "input/zoo.mp4"
-    colmap_out_dir = "output"
-    gsplat_result_dir = "output/splat_results"
-    agent_config_file = "output/config.yaml"
-
     result = pipeline.invoke(
         {
             "feedback": "",
             "approved": False,
             "iteration": 0,
-            "video_path": "video.mp4",
-            "video_name": "bushes",
-            "agent_config_file": "",
+            "video_path": "input/video.mp4",
+            "video_name": "video",
+            "initial_point_cloud_path": "",
+            "config_path": "output/config.yaml",
+            "result_dir": "output/splat_results",
             "input_mode": args.mode,
         }
     )
 
-    # 2: Initialize Baseline Config to start
-    initial_config = {
-        "training": {
-            "max_steps": 2000,  # use low for fast test iters
-            "densify_grad_threshold": 0.0002,  # Baseline standard
-            "opacity_cull_threshold": 0.05,  # Baseline standard
-        }
-    }
-    with open(agent_config_file, "w") as f:
-        yaml.dump(initial_config, f)
-
-    # 3: Main VLM Optimization Loop
-    MAX_LOOP_ATTEMPTS = 3
-    loop_iter = 1
-    pipeline_converged = False
-
-    print("\n==============================================")
-    print("STARTING AUTONOMOUS CODER-CRITIC MULTI-AGENT LOOP")
-    print("==============================================")
-
-    while loop_iter <= MAX_LOOP_ATTEMPTS and not pipeline_converged:
-        print(f"\n--- LOOP ITERATION {loop_iter} ---")
-
-        # A. Train model using the current agent-managed config parameters
-        run_gsplat_training(
-            data_dir=colmap_out_dir,
-            output_dir=gsplat_result_dir,
-            config_path=agent_config_file,
-        )
-
-        # B. Gather evaluation data and structural rendering metrics
-        metrics = extract_eval_metrics(gsplat_result_dir)
-        print(
-            f"[+] Iteration metrics captured -> PSNR: {metrics['psnr']}, SSIM: {metrics['ssim']}"
-        )
-
-        # C. Pass data payload to VLM Critic for audit assessment
-        feedback = mock_vlm_critic(metrics, loop_iter)
-        print(
-            f"[VLM CRITIC STATUS]: {feedback['status']}\nCritique: {feedback['critique']}"
-        )
-
-        # D. Evaluate completion state
-        if feedback["status"] == "ACCEPTED":
-            print(
-                f"\n[✔] Success! The VLM Critic is fully satisfied with the rendering output quality."
-            )
-            pipeline_converged = True
-        else:
-            # E. Loop hasn't met quality conditions yet. Trigger Actor adjustment rewrite
-            mock_actor_agent_rewrite(feedback, agent_config_file)
-            loop_iter += 1
-
-    if not pipeline_converged:
-        print(
-            "\n[!] Pipeline ended due to reaching max iteration limit without explicit VLM convergence."
-        )
-
-    # --- Step 4: Final Scene Inspection Render ---
-    print(
-        "\n[+] Launching local interactive viewer to inspect final output mesh structures..."
-    )
+    exit(0) ### remove if you want to view 
+    print("\n[+] Launching interactive viewer for final output...")
+    colmap_out_dir = f"output/{result['video_name']}"
     pcd = o3d.io.read_point_cloud(f"{colmap_out_dir}/sparse.ply")
     o3d.visualization.draw_geometries([pcd])
