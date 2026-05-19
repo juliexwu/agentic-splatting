@@ -86,7 +86,7 @@ def run_gsplat_training(data_dir, output_dir, config_path):
         "--save_ply"
     ]
     
-    print(f"Starting gsplat training with agent configs...")
+    print("Starting gsplat training with agent configs...")
     subprocess.run(cmd, check=True)
 
 

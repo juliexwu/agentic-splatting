@@ -33,7 +33,7 @@ fused_bilagrid @ git+https://github.com/harry7557558/fused-bilagrid@49f0ef06c9f8
 fused_ssim @ git+https://github.com/rahul-goel/fused-ssim@328dc9836f513d00c4b5bc38fe30478b4435cbb5
 future==1.0.0
 grpcio==1.80.0
-gs-pipeline @ file:///home/nora/Desktop/UCSD/Classes/CSE252-cv/agentic-splatting/gsplat
+# gs-pipeline @ file:///home/nora/Desktop/UCSD/Classes/CSE252-cv/agentic-splatting/gsplat
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1

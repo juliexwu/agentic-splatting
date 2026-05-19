@@ -31,7 +31,7 @@ conda activate 252splat
 
 ```bash
 # Example for CUDA 11.8:
-conda install -c "nvidia/label/cuda-11.8.0" cuda-toolkit -y
+conda install -c "nvidia/label/cuda-12.4.0" cuda-toolkit -y
 conda install -c conda-forge cxx-compiler ninja -y
 ```
 
@@ -40,11 +40,20 @@ conda install -c conda-forge cxx-compiler ninja -y
 Install the version matching your CUDA toolkit:
 
 ```bash
-# Example for CUDA 11.8:
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# Example for CUDA 12.4:
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 ```
 
-### 5. Clone and build gsplat locally
+### 5. Install gcc 13
+```bash
+conda install -c conda-forge gcc=13 gxx=13 -n 252splat --force-reinstall
+git submodule update --init --recursive
+export CUDAHOSTCXX=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++
+export CC=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcc
+export CXX=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++
+```
+
+### 6. Clone and build gsplat locally
 
 > **Why a local clone?** The `pip install gsplat` package does not include `examples/simple_trainer.py`, which this pipeline calls directly. The clone is required to get that script and all dependencies on disk. The `.so` CUDA extension is also compiled locally against your specific CUDA/PyTorch versions.
 
@@ -61,11 +70,11 @@ python -c "from gsplat.cuda import csrc; print('gsplat CUDA extension loaded suc
 python -c "from gsplat import rasterization; print('rasterization ready')"
 ```
 
-### 6. Install remaining dependencies
+### 7. Install remaining dependencies
 Note: requirements.txt is for cu12 which is compatible with cu12.x
 
 ```bash
-pip install -r requirements.txt 
+pip install --no-build-isolation -r requirements.txt
 ```
 
 ---
