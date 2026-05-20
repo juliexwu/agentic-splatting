@@ -1,21 +1,38 @@
+import argparse
 import ffmpeg
 import pathlib
 import pycolmap
+
+import os
+os.environ["OPEN3D_CPU_RENDERING"] = "true"
 import open3d as o3d
+
+# TODO: this is just an example, replace with the path to ffmpeg on your machine if using DSMLP
+PATH_TO_FFMPEG = "/home/usr/.conda/envs/252splat/bin/ffmpeg"
 
 
 def extract_frames(video_path, output_dir, fps=2):
     output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    (
-        ffmpeg.input(str(video_path), hwaccel="cuda", hwaccel_output_format="cuda")
-        .filter("hwdownload")
-        .filter("format", "nv12")
-        .filter("fps", fps=fps)
-        .output(str(output_dir / "frame_%05d.jpg"), **{"q:v": 2})
-        .run(overwrite_output=True)
-    )
+    if dsmlp:
+        (
+            ffmpeg.input(str(video_path), hwaccel="cuda", hwaccel_output_format="cuda")
+            .filter("hwdownload")
+            .filter("format", "nv12")
+            .filter("fps", fps=fps)
+            .output(str(output_dir / "frame_%05d.jpg"), **{"q:v": 2})
+            .run(cmd=PATH_TO_FFMPEG, overwrite_output=True)
+        )
+    else:
+        (
+            ffmpeg.input(str(video_path), hwaccel="cuda", hwaccel_output_format="cuda")
+            .filter("hwdownload")
+            .filter("format", "nv12")
+            .filter("fps", fps=fps)
+            .output(str(output_dir / "frame_%05d.jpg"), **{"q:v": 2})
+            .run(overwrite_output=True)
+        )
 
 
 def images_to_point_cloud(
@@ -33,7 +50,14 @@ def images_to_point_cloud(
 
     device = pycolmap.Device.cuda if use_gpu else pycolmap.Device.cpu
 
-    pycolmap.extract_features(database_path, image_dir, device=device)
+    if dsmlp:
+        options = pycolmap.FeatureExtractionOptions()
+        options.num_threads = 4
+        options.max_image_size = 3200
+
+        pycolmap.extract_features(database_path, image_dir, extraction_options=options, device=device)
+    else:
+        pycolmap.extract_features(database_path, image_dir, device=device)
 
     if match_method == "sequential":
         pycolmap.match_sequential(database_path, device=device)
@@ -60,18 +84,25 @@ def images_to_point_cloud(
 
 
 if __name__ == "__main__":
-    input = "video.mp4"
-    output = "input/test"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dsmlp", action='store_true', help="include this flag if running on DSMLP")
+    args = parser.parse_args()
+
+    global dsmlp
+    dsmlp = args.dsmlp
+
+    input = "input/video.mp4"
+    output = "input/images"
+    
     extract_frames(input, output)
 
-    """
     reconstruction = images_to_point_cloud(
-        image_dir="input/test",
+        image_dir="input/images",
         output_dir="output",
         match_method="sequential",
         dense=False,
+        use_gpu=not dsmlp,
     )
-    """
 
     pcd = o3d.io.read_point_cloud("output/sparse.ply")
     o3d.visualization.draw_geometries([pcd])
