@@ -8,19 +8,24 @@ import yaml
 import argparse
 import torch
 
+from PIL import Image
 from gsplat.rendering import rasterization
 from typing import TypedDict
 from langgraph.graph import StateGraph, END
 from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
+from google import genai
 
 load_dotenv()
 
-ACTOR_MODEL = "Qwen/Qwen2.5-7B-Instruct"
-CRITIC_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
+# ACTOR_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+# CRITIC_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-actor_client = InferenceClient(model=ACTOR_MODEL, token=os.getenv("HF_TOKEN"))
-critic_client = InferenceClient(model=CRITIC_MODEL, token=os.getenv("HF_TOKEN"))
+# actor_client = InferenceClient(model=ACTOR_MODEL, token=os.getenv("HF_TOKEN"))
+# critic_client = InferenceClient(model=CRITIC_MODEL, token=os.getenv("HF_TOKEN"))
+
+client = genai.Client(api_key=os.getenv("GEMINI_KEY"))
+GEMINI_MODEL = "gemini-3.1-pro-preview"
 
 
 class State(TypedDict):
@@ -36,29 +41,29 @@ class State(TypedDict):
 
 
 def call_llm(prompt: str) -> str:
-    response = actor_client.chat.completions.create(
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=512,
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
     )
-    return response.choices[0].message.content.strip()
+
+    return response.text.strip()
 
 
 def call_vlm(prompt: str, image_paths: list[str]) -> str:
-    import base64
+    contents = []
 
-    content = []
     for path in image_paths:
-        with open(path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode()
-        content.append(
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
-        )
-    content.append({"type": "text", "text": prompt})
-    response = critic_client.chat.completions.create(
-        messages=[{"role": "user", "content": content}],
-        max_tokens=256,
+        img = Image.open(path)
+        contents.append(img)
+
+    contents.append(prompt)
+
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=contents,
     )
-    return response.choices[0].message.content.strip()
+
+    return response.text.strip()
 
 
 def _generate_eval_cameras(
