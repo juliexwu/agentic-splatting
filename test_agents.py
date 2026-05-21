@@ -27,6 +27,7 @@ load_dotenv()
 
 client = genai.Client(api_key=os.getenv("GEMINI_KEY"))
 GEMINI_MODEL = "gemma-4-31b-it"
+GEMINI_FALLBACK = "gemma-4-26b-a4b-it"
 
 
 class TrainingConfig(BaseModel):
@@ -65,10 +66,17 @@ def call_vlm(prompt: str, image_paths: list[str]) -> str:
 
     contents.append(prompt)
 
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=contents,
-    )
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=contents,
+        )
+    except:
+        print("Main VLM failed, using fallback model...")
+        response = client.models.generate_content(
+            model=GEMINI_FALLBACK,
+            contents=contents,
+        )
 
     return response.text.strip()
 
@@ -583,6 +591,7 @@ def actor_agent(state: State) -> State:
             f"{current_config_str}\n"
             "Return updated hyperparameters to address the critique."
         )
+        print(prompt)
 
         try:
             response = client.models.generate_content(
@@ -593,7 +602,9 @@ def actor_agent(state: State) -> State:
                     "response_schema": TrainingConfig,
                 },
             )
+            print(response)
             parsed = response.parsed
+            print(parsed)
             cfg = {
                 "training": {
                     "max_steps": parsed.max_steps,
@@ -673,6 +684,7 @@ def critic_agent(state: State) -> State:
         "RECOMMENDATION: <specific hyperparameter adjustments if REJECTED, else None>"
     )
 
+    print(prompt)
     if image_paths:
         response = call_vlm(prompt, image_paths)
     else:
