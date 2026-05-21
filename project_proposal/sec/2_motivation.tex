@@ -1,4 +1,4 @@
 \section{Motivation}
 \label{sec:motivation}
 
-In order to automate the optimization process of 3D GS, we aim to implement an agentic pipeline using an Actor-Critic Agentic AI system. Our proposed pipeline utilizes three VLM agents to select video frames and reconstruct 3D scenes, increasing efficiency and consistency in the optimization process.
+In order to automate the optimization process of 3D GS, we aim to implement an agentic pipeline using an Actor-Critic Agentic AI system. Our proposed pipeline starts by processing videos into image frames or taking image inputs and creates the point clouds as well as other files necessary to initialize GS. Then, the actor and critic VLM agents reconstruct the 3D scenes, rasterize novel views, and provide feedback for training configuration to increase efficiency and consistency in the GS optimization process.

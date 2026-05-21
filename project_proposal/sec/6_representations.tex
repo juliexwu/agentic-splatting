@@ -1,0 +1,23 @@
+\section{Representations}
+\label{sec:representations}
+
+The Prefiltering tool passes the COLMAP processed point clouds of the input frames into the Actor/Critic cycle. As the Actor and Critic work together through iterations, the Actor changes parameters within the Gaussian Splatting training configuration in .yaml format.
+
+\newpage
+\noindent\title{Sample Config.yaml:}
+\begin{figure}[h]
+\centering
+\begin{verbatim}
+{
+ training:
+    densify_grad_threshold: 0.0001
+    max_steps: 30000
+    opacity_cull_threshold: 0.05
+}
+\end{verbatim}
+\caption{Structured JSON feedback schema produced by the Critic agent.}
+\label{fig:json-schema}
+\end{figure}
+
+
+\noindent After completing the GS training, the Actor agent passes a select number (4) of rasterized views of the GS to the Critic. The Critic agent will represent feedback in a structured prompt format, such that the Actor agent can easily interpret it and determine how to iterate based on the feedback.
