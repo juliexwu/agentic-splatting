@@ -325,19 +325,27 @@ def extract_frames(video_path, output_dir, fps=2, cuda=True):
     output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    (
-        ffmpeg.input(str(video_path), hwaccel="cuda", hwaccel_output_format="cuda")
-        .filter("hwdownload")
-        .filter("format", "nv12")
-        .filter("fps", fps=fps)
-        .output(str(output_dir / "frame_%05d.jpg"), **{"q:v": 2})
-        .run(overwrite_output=True)
-    )
-
     if cuda:
+        (
+            ffmpeg.input(str(video_path), hwaccel="cuda", hwaccel_output_format="cuda")
+            .filter("hwdownload")
+            .filter("format", "nv12")
+            .filter("fps", fps=fps)
+            .output(str(output_dir / "frame_%05d.jpg"), **{"q:v": 2})
+            .run(overwrite_output=True)
+        )
+
         for frame_path in sorted(output_dir.glob("frame_*.jpg")):
             img = Image.open(frame_path)
             img.transpose(Image.FLIP_TOP_BOTTOM).save(frame_path)
+
+    else:
+        (
+            ffmpeg.input(str(video_path))
+            .filter("fps", fps=fps)
+            .output(str(output_dir / "frame%05d.jpg"), **{"q:v": 2})
+            .run(overwrite_output=True)
+        )
 
 
 def images_to_point_cloud(
