@@ -25,7 +25,7 @@ load_dotenv()
 # critic_client = InferenceClient(model=CRITIC_MODEL, token=os.getenv("HF_TOKEN"))
 
 client = genai.Client(api_key=os.getenv("GEMINI_KEY"))
-GEMINI_MODEL = "gemini-3.1-pro-preview"
+GEMINI_MODEL = "gemma-4-31b-it"
 
 
 class State(TypedDict):
@@ -321,7 +321,7 @@ def get_render_images(result_dir: str, max_images: int = 4) -> list[str]:
     return []
 
 
-def extract_frames(video_path, output_dir, fps=2):
+def extract_frames(video_path, output_dir, fps=2, cuda=True):
     output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -333,6 +333,11 @@ def extract_frames(video_path, output_dir, fps=2):
         .output(str(output_dir / "frame_%05d.jpg"), **{"q:v": 2})
         .run(overwrite_output=True)
     )
+
+    if cuda:
+        for frame_path in sorted(output_dir.glob("frame_*.jpg")):
+            img = Image.open(frame_path)
+            img.transpose(Image.FLIP_TOP_BOTTOM).save(frame_path)
 
 
 def images_to_point_cloud(
