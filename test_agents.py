@@ -15,6 +15,7 @@ from langgraph.graph import StateGraph, END
 from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
 from google import genai
+from pydantic import BaseModel
 
 load_dotenv()
 
@@ -26,6 +27,12 @@ load_dotenv()
 
 client = genai.Client(api_key=os.getenv("GEMINI_KEY"))
 GEMINI_MODEL = "gemma-4-31b-it"
+
+
+class TrainingConfig(BaseModel):
+    max_steps: int
+    densify_grad_threshold: float
+    opacity_cull_threshold: float
 
 
 class State(TypedDict):
@@ -574,27 +581,33 @@ def actor_agent(state: State) -> State:
             f"{state['feedback']}\n\n"
             "Current training config:\n"
             f"{current_config_str}\n"
-            "Rewrite the config YAML with adjusted hyperparameters to address the critique.\n"
-            "Reply with ONLY valid YAML in the exact same structure. No explanation.\n"
-            "training:\n"
-            "  max_steps: <int>\n"
-            "  densify_grad_threshold: <float>\n"
-            "  opacity_cull_threshold: <float>"
+            "Return updated hyperparameters to address the critique."
         )
 
-        response = call_llm(prompt)
         try:
-            parsed = yaml.safe_load(response)
-            if isinstance(parsed, dict) and "training" in parsed:
-                cfg = parsed
-            else:
-                print(
-                    "[Actor] LLM response missing 'training' key, keeping current config."
-                )
-        except yaml.YAMLError:
-            print("[Actor] Failed to parse LLM YAML response, keeping current config.")
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_schema": TrainingConfig,
+                },
+            )
+            parsed = response.parsed
+            cfg = {
+                "training": {
+                    "max_steps": parsed.max_steps,
+                    "densify_grad_threshold": parsed.densify_grad_threshold,
+                    "opacity_cull_threshold": parsed.opacity_cull_threshold,
+                }
+            }
+            print(f"[Actor] Updated config: {cfg['training']}")
+        except Exception as e:
+            print(f"[Actor] Structured output failed ({e}), keeping current config.")
 
-    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    config_dir = os.path.dirname(config_path)
+    if config_dir:
+        os.makedirs(config_dir, exist_ok=True)
     with open(config_path, "w") as f:
         yaml.dump(cfg, f)
 
