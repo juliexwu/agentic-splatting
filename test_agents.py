@@ -336,7 +336,7 @@ def get_render_images(result_dir: str, max_images: int = 4) -> list[str]:
     return []
 
 
-def extract_frames(video_path, output_dir, fps=2, cuda=True):
+def extract_frames(video_path, output_dir, fps=2, cuda=True): # cuda=False for gpu
     output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -566,7 +566,7 @@ def prefiltering_agent(state: State) -> State:
 
 def actor_agent(state: State) -> State:
     print(
-        f"[Actor Agent] Iteration {state['iteration']} - updating config and launching training..."
+        f"[Actor Agent] Iteration {state['iteration']+1} - updating config and launching training..."
     )
     config_path = state["config_path"]
 
