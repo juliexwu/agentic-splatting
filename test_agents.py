@@ -32,8 +32,28 @@ GEMINI_FALLBACK = "gemma-4-26b-a4b-it"
 
 class TrainingConfig(BaseModel):
     max_steps: int
-    densify_grad_threshold: float
     opacity_cull_threshold: float
+    # learning_rate_position: float
+    # learning_rate_feature: float
+    # learning_rate_opacity: float
+    # learning_rate_scaling: float
+    # learning_rate_rotation: float
+    # lr_position_final: float
+    # lr_delay_steps: int
+    # lr_delay_mult: float
+
+    densify_grad_threshold: float
+    # densify_from_step: int
+    densify_until_step: int
+    # densification_interval: int
+    densify_size_threshold: float
+    max_num_gaussians: int
+
+
+# class TrainingConfig(BaseModel):
+#     max_steps: int
+#     densify_grad_threshold: float
+#     opacity_cull_threshold: float
 
 
 class State(TypedDict):
@@ -453,9 +473,17 @@ def run_gsplat_training(data_dir, output_dir, config_path):
         str(cfg["training"]["densify_grad_threshold"]),
         "--strategy.prune_opa",
         str(cfg["training"]["opacity_cull_threshold"]),
+        "--strategy.refine_stop_iter",
+        str(cfg["training"]["densify_until_step"]),
+        "--strategy.cap_max",
+        str(cfg["training"]["max_num_gaussians"]),
+        "--strategy.prune_scale3d",
+        str(cfg["training"]["densify_size_threshold"]),
         "--data_factor",
         "1",
         "--disable_viewer",
+        "--render_traj_factor",
+        "4",
         "--save_ply",
     ]
 
@@ -592,14 +620,27 @@ def actor_agent(state: State) -> State:
     )
     config_path = state["config_path"]
 
+    DEFAULT_TRAINING_CONFIG = TrainingConfig(
+        max_steps=2000,
+        opacity_cull_threshold=0.05,
+        # learning_rate_position=1.6e-4,
+        # learning_rate_feature=2.5e-3,
+        # learning_rate_opacity=5e-2,
+        # learning_rate_scaling=5e-3,
+        # learning_rate_rotation=1e-3,
+        # lr_position_final=1.6e-6,
+        # lr_delay_steps=0,
+        # lr_delay_mult=0.01,
+        densify_grad_threshold=0.0002,
+        # densify_from_step=500,
+        densify_until_step=15000,
+        # densification_interval=100,
+        densify_size_threshold=0.01,
+        max_num_gaussians=500_000,
+    )
+
     if state["iteration"] == 0 or not os.path.exists(config_path):
-        cfg = {
-            "training": {
-                "max_steps": 2000,
-                "densify_grad_threshold": 0.0002,
-                "opacity_cull_threshold": 0.05,
-            }
-        }
+        cfg = {"training": DEFAULT_TRAINING_CONFIG.model_dump()}
     else:
         with open(config_path, "r") as f:
             cfg = yaml.safe_load(f)
@@ -627,13 +668,7 @@ def actor_agent(state: State) -> State:
             print(response)
             parsed = response.parsed
             print(parsed)
-            cfg = {
-                "training": {
-                    "max_steps": parsed.max_steps,
-                    "densify_grad_threshold": parsed.densify_grad_threshold,
-                    "opacity_cull_threshold": parsed.opacity_cull_threshold,
-                }
-            }
+            cfg = {"training": parsed.model_dump()}
             print(f"[Actor] Updated config: {cfg['training']}")
         except Exception as e:
             print(response)
