@@ -380,12 +380,19 @@ def images_to_point_cloud(
 
     device = pycolmap.Device.cuda if use_gpu else pycolmap.Device.cpu
 
-    try:
-        pycolmap.extract_features(database_path, image_dir, device=device)
-    except ValueError:
-        print("[!] CUDA SIFT unavailable, retrying on CPU.")
-        device = pycolmap.Device.cpu
-        pycolmap.extract_features(database_path, image_dir, device=device)
+    if dsmlp:
+        options = pycolmap.FeatureExtractionOptions()
+        options.num_threads = 6
+        options.max_image_size = 3200
+
+        pycolmap.extract_features(database_path, image_dir, extraction_options=options, device=device)
+    else:
+        try:
+            pycolmap.extract_features(database_path, image_dir, device=device)
+        except ValueError:
+            print("[!] CUDA SIFT unavailable, retrying on CPU.")
+            device = pycolmap.Device.cpu
+            pycolmap.extract_features(database_path, image_dir, device=device)
 
     if match_method == "sequential":
         pycolmap.match_sequential(database_path, device=device)
@@ -546,12 +553,13 @@ def prefiltering_agent(state: State) -> State:
     image_dir = f"{output_dir}/images"
 
     if state["input_mode"] == 0:
-        extract_frames(state["video_path"], image_dir)
+        extract_frames(state["video_path"], image_dir, cuda=(not dsmlp))
         images_to_point_cloud(
             image_dir=image_dir,
             output_dir=output_dir,
             match_method="sequential",
             dense=False,
+            use_gpu=(not dsmlp),
         )
     else:
         images_to_point_cloud(
@@ -559,6 +567,7 @@ def prefiltering_agent(state: State) -> State:
             output_dir=output_dir,
             match_method="sequential",
             dense=False,
+            use_gpu=(not dsmlp),
         )
 
     return {**state, "initial_point_cloud_path": output_dir}
@@ -589,7 +598,7 @@ def actor_agent(state: State) -> State:
             f"{state['feedback']}\n\n"
             "Current training config:\n"
             f"{current_config_str}\n"
-            "Return updated hyperparameters to address the critique."
+            "Return updated hyperparameters in .json format to address the critique."
         )
         print(prompt)
 
@@ -614,6 +623,7 @@ def actor_agent(state: State) -> State:
             }
             print(f"[Actor] Updated config: {cfg['training']}")
         except Exception as e:
+            print(response)
             print(f"[Actor] Structured output failed ({e}), keeping current config.")
 
     config_dir = os.path.dirname(config_path)
@@ -719,7 +729,11 @@ if __name__ == "__main__":
         choices=[0, 1],
         help="0 for video, 1 for images",
     )
+    parser.add_argument("--dsmlp", action='store_true', help="include this flag if running on DSMLP")
     args = parser.parse_args()
+
+    global dsmlp
+    dsmlp = args.dsmlp
 
     graph = StateGraph(State)
     graph.add_node("prefiltering_agent", prefiltering_agent)
