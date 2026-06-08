@@ -46,6 +46,7 @@ class State(TypedDict):
     config_path: str
     result_dir: str
     input_mode: int
+    skip_preprocessing: bool
 
 
 def call_llm(prompt: str) -> str:
@@ -336,7 +337,7 @@ def get_render_images(result_dir: str, max_images: int = 4) -> list[str]:
     return []
 
 
-def extract_frames(video_path, output_dir, fps=2, cuda=True): # cuda=False for gpu
+def extract_frames(video_path, output_dir, fps=2, cuda=True):  # cuda=False for gpu
     output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -542,8 +543,17 @@ def extract_eval_metrics(result_dir: str) -> dict:
 
 def prefiltering_agent(state: State) -> State:
     print("Prefiltering Agent running...")
+
     output_dir = f"output/{state['video_name']}"
     image_dir = f"{output_dir}/images"
+
+    if state["skip_preprocessing"]:
+        print("[Prefiltering] Skipping frame extraction and COLMAP.")
+
+        return {
+            **state,
+            "initial_point_cloud_path": output_dir,
+        }
 
     if state["input_mode"] == 0:
         extract_frames(state["video_path"], image_dir)
@@ -561,7 +571,10 @@ def prefiltering_agent(state: State) -> State:
             dense=False,
         )
 
-    return {**state, "initial_point_cloud_path": output_dir}
+    return {
+        **state,
+        "initial_point_cloud_path": output_dir,
+    }
 
 
 def actor_agent(state: State) -> State:
@@ -719,6 +732,12 @@ if __name__ == "__main__":
         choices=[0, 1],
         help="0 for video, 1 for images",
     )
+
+    parser.add_argument(
+        "--skip_preprocessing",
+        action="store_true",
+        help="Skip frame extraction and COLMAP reconstruction",
+    )
     args = parser.parse_args()
 
     graph = StateGraph(State)
@@ -751,6 +770,7 @@ if __name__ == "__main__":
             "config_path": "output/config.yaml",
             "result_dir": "output/splat_results",
             "input_mode": args.mode,
+            "skip_preprocessing": args.skip_preprocessing,
         }
     )
 
