@@ -3,6 +3,7 @@ import pathlib
 import pycolmap
 import open3d as o3d
 import os
+import shutil
 import subprocess
 import yaml
 import argparse
@@ -357,7 +358,7 @@ def get_render_images(result_dir: str, max_images: int = 4) -> list[str]:
     return []
 
 
-def extract_frames(video_path, output_dir, fps=2, cuda=True):  # cuda=False for gpu
+def extract_frames(video_path, output_dir, fps=2, cuda=False):  # cuda=False for gpu
     output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -483,7 +484,9 @@ def run_gsplat_training(data_dir, output_dir, config_path):
         "1",
         "--disable_viewer",
         "--render_traj_factor",
-        "4",
+        "1",
+        "--render_traj_max_frames",
+        "250",
         "--save_ply",
     ]
 
@@ -685,6 +688,18 @@ def actor_agent(state: State) -> State:
         output_dir=state["result_dir"],
         config_path=config_path,
     )
+
+    # Archive final checkpoint and PLY for this iteration
+    result_dir = pathlib.Path(state["result_dir"])
+    archive_dir = result_dir / f"iter_{state['iteration']}"
+    archive_dir.mkdir(exist_ok=True)
+
+    for src in sorted((result_dir / "ckpts").glob("*.pt")):
+        shutil.copy2(src, archive_dir / src.name)
+    for src in sorted((result_dir / "ply").glob("*.ply")):
+        shutil.copy2(src, archive_dir / src.name)
+
+    print(f"[Actor] Archived checkpoint and PLY to {archive_dir}")
 
     return {**state}
 
