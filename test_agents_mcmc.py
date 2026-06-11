@@ -1,0 +1,927 @@
+import ffmpeg
+import pathlib
+import pycolmap
+import open3d as o3d
+import os
+import subprocess
+import yaml
+import argparse
+import torch
+
+from PIL import Image
+from gsplat.rendering import rasterization
+from typing import TypedDict
+from langgraph.graph import StateGraph, END
+from dotenv import load_dotenv
+from huggingface_hub import InferenceClient
+from google import genai
+from pydantic import BaseModel, Field
+
+load_dotenv()
+
+# ACTOR_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+# CRITIC_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
+
+# actor_client = InferenceClient(model=ACTOR_MODEL, token=os.getenv("HF_TOKEN"))
+# critic_client = InferenceClient(model=CRITIC_MODEL, token=os.getenv("HF_TOKEN"))
+
+client = genai.Client(api_key=os.getenv("GEMINI_KEY"))
+GEMINI_MODEL = "gemma-4-31b-it"
+GEMINI_FALLBACK = "gemma-4-26b-a4b-it"
+
+
+class TrainingConfig(BaseModel):
+    """
+    Hyperparameters for gsplat simple_trainer.py (mcmc mode) that an LLM
+    can tune from visual feedback. max_steps is fixed; Gaussian count is
+    capped externally via --strategy.cap-max 500000.
+    """
+
+    max_steps: int = Field(
+        default=30000,
+        ge=30000,
+        le=30000,
+        description="Total training iterations. Fixed at 30000.",
+    )
+
+    ssim_lambda: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=0.5,
+        description=(
+            "Weight of the SSIM loss term; the L1 weight is (1 - ssim_lambda). "
+            "INCREASE → reward structural sharpness; good when edges are soft/blurry. "
+            "DECREASE → reward pixel-level accuracy; good when colors are off."
+        ),
+    )
+
+    opacity_reg: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=0.05,
+        description=(
+            "L1 regularisation on Gaussian opacity (--opacity_reg). "
+            "INCREASE → reduces semi-transparent floaters in empty space. "
+            "0.0 disables. Start with 0.01 if floaters are visible."
+        ),
+    )
+
+    scale_reg: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=0.05,
+        description=(
+            "L1 regularisation on Gaussian scale (--scale_reg). "
+            "INCREASE → discourages needle-like or pancake Gaussians. "
+            "0.0 disables. Start with 0.01 if you see streak/shard artifacts."
+        ),
+    )
+
+
+def default_training_cfg() -> dict:
+    m = TrainingConfig()
+    return {
+        "training": {
+            "max_steps":   m.max_steps,
+            "ssim_lambda": m.ssim_lambda,
+            "opacity_reg": m.opacity_reg,
+            "scale_reg":   m.scale_reg,
+        }
+    }
+
+
+class State(TypedDict):
+    feedback: str
+    approved: bool
+    iteration: int
+    video_name: str
+    video_path: str
+    initial_point_cloud_path: str
+    config_path: str
+    result_dir: str
+    current_iter_result_dir: str
+    input_mode: int
+    metric_history: list
+
+
+def call_llm(prompt: str) -> str:
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+    )
+
+    return response.text.strip()
+
+
+def call_vlm(prompt: str, image_paths: list[str]) -> str:
+    contents = []
+
+    for path in image_paths:
+        img = Image.open(path)
+        contents.append(img)
+
+    contents.append(prompt)
+
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=contents,
+        )
+    except:
+        print("Main VLM failed, using fallback model...")
+        response = client.models.generate_content(
+            model=GEMINI_FALLBACK,
+            contents=contents,
+        )
+
+    return response.text.strip()
+
+
+def _generate_eval_cameras(
+    scene_center: torch.Tensor,
+    radius: float,
+    width: int,
+    height: int,
+    device: torch.device,
+    n_orbit: int = 4,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Generate evaluation camera viewmats (world-to-cam, [C, 4, 4]) and
+    intrinsics Ks ([C, 3, 3]) for novel-view diagnostics.
+
+    Produces `n_orbit` cameras evenly spaced in azimuth around `scene_center`
+    at elevation ~30°, plus one overhead (nadir) view.
+
+    Returns:
+        viewmats: [C, 4, 4] float32 world-to-cam transforms
+        Ks:       [C, 3, 3] float32 pinhole intrinsics
+    """
+    import torch
+    import math
+
+    C = n_orbit + 1  # orbit views + nadir
+    viewmats = torch.zeros(C, 4, 4, dtype=torch.float32, device=device)
+    elev_rad = math.radians(30)
+
+    for i in range(n_orbit):
+        azimuth = 2 * math.pi * i / n_orbit
+        # Camera position on a sphere around the scene centre
+        cam_pos = scene_center + torch.tensor(
+            [
+                radius * math.cos(elev_rad) * math.cos(azimuth),
+                radius * math.sin(elev_rad),
+                radius * math.cos(elev_rad) * math.sin(azimuth),
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+        # Look-at: forward = scene_center - cam_pos, world up = (0,1,0)
+        forward = torch.nn.functional.normalize(scene_center - cam_pos, dim=0)
+        world_up = torch.tensor([0.0, 1.0, 0.0], device=device)
+        right = torch.nn.functional.normalize(
+            torch.linalg.cross(forward, world_up), dim=0
+        )
+        up = torch.linalg.cross(right, forward)
+
+        # Rotation matrix (rows = right, up, -forward in camera convention)
+        R = torch.stack([right, up, -forward], dim=0)  # [3, 3]
+        t = -R @ cam_pos  # [3]
+
+        viewmats[i, :3, :3] = R
+        viewmats[i, :3, 3] = t
+        viewmats[i, 3, 3] = 1.0
+
+    # Nadir (top-down) view: camera directly above, looking straight down
+    nadir_pos = scene_center + torch.tensor(
+        [0.0, radius, 0.0], dtype=torch.float32, device=device
+    )
+    forward_nadir = torch.nn.functional.normalize(scene_center - nadir_pos, dim=0)
+    right_nadir = torch.tensor([1.0, 0.0, 0.0], device=device)
+    up_nadir = torch.linalg.cross(right_nadir, forward_nadir)
+
+    R_nadir = torch.stack([right_nadir, up_nadir, -forward_nadir], dim=0)
+    t_nadir = -R_nadir @ nadir_pos
+    viewmats[n_orbit, :3, :3] = R_nadir
+    viewmats[n_orbit, :3, 3] = t_nadir
+    viewmats[n_orbit, 3, 3] = 1.0
+
+    # Simple pinhole intrinsics: 60° horizontal FoV
+    fx = width / (2 * math.tan(math.radians(60) / 2))
+    fy = fx
+    cx, cy = width / 2.0, height / 2.0
+    K = torch.tensor(
+        [[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float32, device=device
+    )
+    Ks = K.unsqueeze(0).expand(C, -1, -1).contiguous()  # [C, 3, 3]
+
+    return viewmats, Ks
+
+
+def render_diagnostic_views(
+    checkpoint_path: str,
+    output_image_dir: str,
+    width: int = 800,
+    height: int = 600,
+) -> list[str]:
+    """
+    Load a gsplat checkpoint, render novel-view diagnostic images with
+    gsplat's rasterization kernel, and save them as PNGs.
+
+    Args:
+        checkpoint_path: Path to the .ckpt file saved by simple_trainer.py.
+        output_image_dir: Directory where eval_view_N.png frames are written.
+        width:  Render width in pixels.
+        height: Render height in pixels.
+
+    Returns:
+        List of absolute paths to the saved PNG files.
+    """
+    import torch
+    from torchvision.utils import save_image
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    output_dir = pathlib.Path(output_image_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------ #
+    # 1. Load checkpoint
+    # ------------------------------------------------------------------ #
+    ckpt = torch.load(checkpoint_path, map_location=device)
+
+    # simple_trainer.py saves a nested dict under the key "splats"
+    splats = ckpt.get("splats", ckpt)
+
+    means = splats["means"].to(device)  # [N, 3]
+    quats = splats["quats"].to(device)  # [N, 4]  wxyz
+    scales = torch.exp(splats["scales"]).to(device)  # [N, 3]  log-space in ckpt
+    opacities = torch.sigmoid(splats["opacities"]).to(device)  # [N]
+
+    # Colours: may be raw RGB [N,3] or SH coefficients [N, K, 3]
+    colors_raw = splats.get("sh0", splats.get("colors", None))
+    if colors_raw is None:
+        raise KeyError("Checkpoint has neither 'sh0' nor 'colors' key.")
+    colors = colors_raw.to(device)  # let rasterization handle SH if needed
+
+    # ------------------------------------------------------------------ #
+    # 2. Build diagnostic cameras around the scene centroid
+    # ------------------------------------------------------------------ #
+    scene_center = means.mean(dim=0)  # [3]
+    # Use the 90th-percentile distance as the orbit radius so the splat fits
+    dists = torch.linalg.norm(means - scene_center, dim=-1)
+    radius = float(torch.quantile(dists, 0.90).item()) * 2.5
+    radius = max(radius, 1.0)  # guard against degenerate scenes
+
+    viewmats, Ks = _generate_eval_cameras(
+        scene_center=scene_center,
+        radius=radius,
+        width=width,
+        height=height,
+        device=device,
+    )
+
+    # ------------------------------------------------------------------ #
+    # 3. Rasterize
+    # ------------------------------------------------------------------ #
+    # rasterization() expects colors shaped [N, D] for plain RGB (D=3)
+    # or [N, K, 3] for SH; it handles the SH→RGB conversion internally
+    # when sh_degree is passed.
+    sh_degree = None
+    if colors.ndim == 3:
+        # SH coefficients: [N, K, 3] — infer degree from K
+        K_coeffs = colors.shape[1]
+        sh_degree = int(K_coeffs**0.5) - 1  # 1→deg0, 4→deg1, 9→deg2 …
+
+    with torch.no_grad():
+        render_colors, render_alphas, _ = rasterization(
+            means=means,
+            quats=quats,
+            scales=scales,
+            opacities=opacities,
+            colors=colors,
+            viewmats=viewmats,  # [C, 4, 4]
+            Ks=Ks,  # [C, 3, 3]
+            width=width,
+            height=height,
+            sh_degree=sh_degree,
+            render_mode="RGB",
+            packed=True,
+        )
+    # render_colors: [C, H, W, 3] in [0, 1]
+
+    # ------------------------------------------------------------------ #
+    # 4. Save frames
+    # ------------------------------------------------------------------ #
+    saved_paths: list[str] = []
+    for idx in range(render_colors.shape[0]):
+        frame = render_colors[idx]  # [H, W, 3]
+        frame = frame.permute(2, 0, 1)  # [3, H, W]  — torchvision convention
+        frame = frame.clamp(0.0, 1.0)
+        out_path = output_dir / f"eval_view_{idx:02d}.png"
+        save_image(frame, str(out_path))
+        saved_paths.append(str(out_path))
+        print(f"  [render] Saved {out_path}")
+
+    return saved_paths
+
+
+def get_render_images(result_dir: str, max_images: int = 4) -> list[str]:
+    """
+    Return paths to render images produced by simple_trainer's eval pass.
+
+    simple_trainer saves side-by-side (GT | render) images to:
+      {result_dir}/renders/val_{i:04d}.png
+
+    These are written automatically when --eval_steps fires.  We prefer the
+    trainer's own renders (they show GT alongside the render, which is more
+    useful for the critic) and only fall back to render_diagnostic_views() if
+    the renders/ directory is empty (e.g. eval hasn't run yet).
+
+    Args:
+        result_dir:  The gsplat output directory.
+        max_images:  Maximum number of images to return to the critic.
+
+    Returns:
+        List of PNG paths (up to `max_images`), or [] if nothing is available.
+    """
+    result_dir = pathlib.Path(result_dir)
+    render_dir = result_dir / "renders"
+
+    # ------------------------------------------------------------------ #
+    # 1. Use trainer's own eval renders (val_NNNN.png) — best option
+    # ------------------------------------------------------------------ #
+    if render_dir.exists():
+        val_renders = sorted(render_dir.glob("val_*.png"))
+        if val_renders:
+            # Space them out so we get a spread across the val set
+            step = max(1, len(val_renders) // max_images)
+            chosen = val_renders[::step][:max_images]
+            print(
+                f"[render] Using {len(chosen)} trainer eval renders from {render_dir}"
+            )
+            return [str(p) for p in chosen]
+
+    # ------------------------------------------------------------------ #
+    # 2. Fall back to rendering novel views from the checkpoint ourselves
+    # ------------------------------------------------------------------ #
+    ckpt_dir = result_dir / "ckpts"
+    checkpoint_path = None
+
+    if ckpt_dir.exists():
+        ckpts = (
+            list(ckpt_dir.glob("ckpt_*_rank0.pt"))
+            or list(ckpt_dir.glob("*.pt"))
+            or list(ckpt_dir.glob("*.ckpt"))
+        )
+        if ckpts:
+            checkpoint_path = max(ckpts, key=lambda p: p.stat().st_mtime)
+
+    if checkpoint_path is not None:
+        print(
+            f"[render] No trainer renders found; rendering from checkpoint: {checkpoint_path}"
+        )
+        try:
+            saved = render_diagnostic_views(
+                checkpoint_path=str(checkpoint_path),
+                output_image_dir=str(render_dir),
+            )
+            return saved[:max_images]
+        except Exception as exc:
+            print(f"[render] Rendering failed ({exc}), no images available.")
+
+    print("[render] No renders or checkpoints found.")
+    return []
+
+
+def extract_frames(video_path, output_dir, fps=2, cuda=True): # cuda=False for gpu
+    output_dir = pathlib.Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if cuda:
+        (
+            ffmpeg.input(str(video_path), hwaccel="cuda", hwaccel_output_format="cuda")
+            .filter("hwdownload")
+            .filter("format", "nv12")
+            .filter("fps", fps=fps)
+            .output(str(output_dir / "frame_%05d.jpg"), **{"q:v": 2})
+            .run(overwrite_output=True)
+        )
+
+        for frame_path in sorted(output_dir.glob("frame_*.jpg")):
+            img = Image.open(frame_path)
+            img.transpose(Image.FLIP_TOP_BOTTOM).save(frame_path)
+
+    else:
+        (
+            ffmpeg.input(str(video_path))
+            .filter("fps", fps=fps)
+            .output(str(output_dir / "frame%05d.jpg"), **{"q:v": 2})
+            .run(overwrite_output=True)
+        )
+
+
+def images_to_point_cloud(
+    image_dir,
+    output_dir,
+    match_method="exhaustive",
+    dense=False,
+    use_gpu=True,
+):
+    image_dir = pathlib.Path(image_dir)
+    output_dir = pathlib.Path(output_dir)
+    database_path = output_dir / "database.db"
+    mvs_path = output_dir / "mvs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if database_path.exists():
+        database_path.unlink()
+
+    device = pycolmap.Device.cuda if use_gpu else pycolmap.Device.cpu
+
+    try:
+        pycolmap.extract_features(database_path, image_dir, device=device)
+    except ValueError:
+        print("[!] CUDA SIFT unavailable, retrying on CPU.")
+        device = pycolmap.Device.cpu
+        pycolmap.extract_features(database_path, image_dir, device=device)
+
+    if match_method == "sequential":
+        pycolmap.match_sequential(database_path, device=device)
+    elif match_method == "exhaustive":
+        pycolmap.match_exhaustive(database_path, device=device)
+    else:
+        raise ValueError("match_method must be 'sequential' or 'exhaustive'")
+
+    sparse_dir = output_dir / "sparse"
+    sparse_dir.mkdir(exist_ok=True)
+    maps = pycolmap.incremental_mapping(database_path, image_dir, sparse_dir)
+    if not maps:
+        raise RuntimeError("Reconstruction failed — check image overlap and quality")
+
+    reconstruction = maps[0]
+    reconstruction.export_PLY(output_dir / "sparse.ply")
+
+    if dense:
+        mvs_path.mkdir(exist_ok=True)
+        pycolmap.undistort_images(mvs_path, output_dir, image_dir)
+        pycolmap.patch_match_stereo(mvs_path)
+        pycolmap.stereo_fusion(mvs_path / "dense.ply", mvs_path)
+
+    return reconstruction
+
+
+def run_gsplat_training(data_dir, output_dir, config_path):
+    with open(config_path, "r") as f:
+        cfg = yaml.safe_load(f)
+
+    t = cfg["training"]
+    max_steps = t["max_steps"]
+
+    cmd = [
+        "python", "gsplat/examples/simple_trainer.py", "mcmc",
+        "--data_dir",         str(data_dir),
+        "--result_dir",       str(output_dir),
+        "--data_factor",      "1",
+        "--max_steps",        str(max_steps),
+        "--save_steps",       str(max_steps),
+        "--eval_steps",       str(max_steps),
+        "--strategy.cap-max", "500000",
+        "--ssim_lambda",      str(t["ssim_lambda"]),
+        "--opacity_reg",      str(t["opacity_reg"]),
+        "--scale_reg",        str(t["scale_reg"]),
+        "--disable_viewer",
+        "--save_ply",
+    ]
+
+    print("Starting gsplat training (mcmc, cap=500k)...")
+    print("CMD:", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+
+def extract_eval_metrics(result_dir: str) -> dict:
+    """
+    Parse evaluation metrics written by simple_trainer.py.
+
+    simple_trainer writes two kinds of JSON into {result_dir}/stats/:
+
+      val_step{step:05d}.json   — eval pass: contains psnr, ssim, lpips,
+                                   ellipse_time, num_GS
+      train_step{step:05d}.json — training pass: contains mem, ellipse_time,
+                                   num_GS  (NO loss, NO psnr)
+
+    We scan all JSON files for the one with the richest metrics (any file that
+    has psnr wins; otherwise we report what we can from training stats).
+    """
+    import json
+
+    result_dir = pathlib.Path(result_dir)
+    stats_dir = result_dir / "stats"
+
+    fallback = {"psnr": None, "ssim": None, "lpips": None, "num_gs": None}
+
+    if not stats_dir.exists():
+        print("[metrics] stats/ directory not found — returning empty metrics.")
+        return fallback
+
+    def _load(path):
+        with open(path) as f:
+            return json.load(f)
+
+    # ── 1. Prefer any file that has PSNR (written by eval pass) ──────────
+    # simple_trainer names them val_step*.json but scan all to be safe.
+    all_json = sorted(stats_dir.glob("*.json"))
+    if not all_json:
+        print("[metrics] No JSON stats files found — returning empty metrics.")
+        return fallback
+
+    eval_candidates = []
+    for p in all_json:
+        try:
+            d = _load(p)
+            if "psnr" in d or "PSNR" in d:
+                eval_candidates.append((p, d))
+        except Exception:
+            pass
+
+    if eval_candidates:
+        # Pick the one with the highest step number (latest mtime as tiebreak)
+        latest_path, data = max(eval_candidates, key=lambda t: t[0].stat().st_mtime)
+        metrics = {
+            "psnr": data.get("psnr", data.get("PSNR")),
+            "ssim": data.get("ssim", data.get("SSIM")),
+            "lpips": data.get("lpips", data.get("LPIPS")),
+            "num_gs": data.get("num_GS", data.get("num_gs")),
+        }
+        print(f"[metrics] Loaded eval metrics from {latest_path.name}: {metrics}")
+        return metrics
+
+    # ── 2. No eval stats yet — extract what we can from training stats ───
+    # Training JSONs have: {"mem": float, "ellipse_time": float, "num_GS": int}
+    train_candidates = []
+    for p in all_json:
+        try:
+            d = _load(p)
+            if "num_GS" in d or "mem" in d:
+                train_candidates.append((p, d))
+        except Exception:
+            pass
+
+    if train_candidates:
+        latest_path, data = max(train_candidates, key=lambda t: t[0].stat().st_mtime)
+        metrics = {
+            **fallback,
+            "num_gs": data.get("num_GS"),
+            "mem_gb": data.get("mem"),
+            "ellipse_time": data.get("ellipse_time"),
+        }
+        print(
+            f"[metrics] No eval stats yet; loaded train stats from {latest_path.name}: {metrics}"
+        )
+        return metrics
+
+    print("[metrics] No parseable stats files found — returning empty metrics.")
+    return fallback
+
+def get_meta(field, attr):
+    for m in field.metadata:
+        if hasattr(m, attr):
+            return getattr(m, attr)
+    return "?"
+
+def format_metric_history(history: list[dict]) -> str:
+    if not history:
+        return "No prior iterations."
+    lines = []
+    for i, m in enumerate(history):
+        def _f(v, d=3):
+            if v is None or v == "?":
+                return "N/A"
+            try:
+                return f"{float(v):.{d}f}"
+            except (TypeError, ValueError):
+                return str(v)
+        lines.append(
+            f"  iter {i+1}: PSNR={_f(m.get('psnr'), 3)}, "
+            f"SSIM={_f(m.get('ssim'), 4)}, "
+            f"LPIPS={_f(m.get('lpips'), 4)}, "
+            f"num_GS={m.get('num_gs', 'N/A')}"
+        )
+    return "\n".join(lines)
+
+def parse_critic_recommendations(feedback: str, current_cfg: dict) -> dict:
+    import re
+
+    # Only the 3 params the LLM can now control
+    param_keys = ["ssim_lambda", "opacity_reg", "scale_reg"]
+    merged = dict(current_cfg)
+
+    rec_match = re.search(r"RECOMMENDATIONS:\s*\n(.*)", feedback, re.DOTALL)
+    if not rec_match:
+        print("[Actor] No RECOMMENDATIONS block found — keeping config.")
+        return merged
+
+    rec_block = rec_match.group(1)
+    for key in param_keys:
+        pattern = rf"{key}\s*:\s*([^\n]+)"
+        m = re.search(pattern, rec_block, re.IGNORECASE)
+        if not m:
+            continue
+        raw = m.group(1).strip().lower().strip("'\"")
+        if raw == "keep":
+            continue
+        try:
+            current_val = merged.get(key)
+            merged[key] = int(float(raw)) if isinstance(current_val, int) else float(raw)
+            print(f"  [Actor] {key}: {current_val} → {merged[key]}")
+        except ValueError:
+            print(f"  [Actor] Could not parse '{raw}' for {key} — keeping.")
+
+    return merged
+
+def prefiltering_agent(state: State) -> State:
+    print("Prefiltering Agent running...")
+    output_dir = f"output/{state['video_name']}"
+    image_dir = f"{output_dir}/images"
+
+    if state["input_mode"] == 0:
+        extract_frames(state["video_path"], image_dir)
+        images_to_point_cloud(
+            image_dir=image_dir,
+            output_dir=output_dir,
+            match_method="sequential",
+            dense=False,
+        )
+    else:
+        images_to_point_cloud(
+            image_dir=image_dir,
+            output_dir=output_dir,
+            match_method="sequential",
+            dense=False,
+        )
+
+    return {**state, "initial_point_cloud_path": output_dir}
+
+
+def actor_agent(state: State) -> State:
+    print(f"[Actor Agent] Iteration {state['iteration']+1} - updating config...")
+    config_path = state["config_path"]
+
+    iteration_result_dir = os.path.join(
+        state["result_dir"], f"iter_{state['iteration']:02d}"
+    )
+
+    if state["iteration"] == 0 or not os.path.exists(config_path):
+        cfg = default_training_cfg()
+    else:
+        with open(config_path, "r") as f:
+            cfg = yaml.safe_load(f)
+
+        current_training = cfg["training"]
+        recommended = parse_critic_recommendations(state["feedback"], current_training)
+
+        schema_hints = "\n".join(
+            f"  {name}: range [{get_meta(field, 'ge')}, {get_meta(field, 'le')}] — {field.description}"
+            for name, field in TrainingConfig.model_fields.items()
+            if name != "max_steps"
+        )
+
+        diff_lines = []
+        for k, new in recommended.items():
+            if k == "max_steps":
+                continue
+            old = current_training.get(k)
+            tag = "(critic suggestion)" if old != new else "(no change)"
+            diff_lines.append(f"  {k}: {old} → {new}  {tag}")
+        diff_str = "\n".join(diff_lines)
+
+        prompt = (
+            "You are an expert ML engineer specialising in 3D Gaussian Splatting (MCMC mode).\n"
+            "Training uses MCMCStrategy with a hard cap of 500,000 Gaussians.\n"
+            f"max_steps is fixed at {cfg['training']['max_steps']} and MUST NOT be changed.\n\n"
+            "=== CRITIC FEEDBACK ===\n"
+            f"{state['feedback']}\n\n"
+            "=== CURRENT CONFIG ===\n"
+            f"{yaml.dump({'training': current_training})}\n\n"
+            "=== CRITIC'S RECOMMENDED CHANGES ===\n"
+            f"{diff_str}\n\n"
+            "=== PARAMETER REFERENCE ===\n"
+            f"{schema_hints}\n\n"
+            "=== RULES ===\n"
+            "1. Accept critic recommendations unless they violate safe ranges.\n"
+            "2. max_steps is FIXED — always return its current value, no exceptions.\n"
+            "3. Make conservative changes (≤30% shift per param per iteration).\n"
+            "4. Return ONLY valid JSON matching the TrainingConfig schema.\n"
+        )
+        print(prompt)
+
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_schema": TrainingConfig,
+                },
+            )
+            parsed: TrainingConfig = response.parsed
+            cfg = {
+                "training": {
+                    "max_steps":   state["training_max_steps"],
+                    "ssim_lambda": parsed.ssim_lambda,
+                    "opacity_reg": parsed.opacity_reg,
+                    "scale_reg":   parsed.scale_reg,
+                }
+            }
+            print(f"[Actor] Final config: {cfg['training']}")
+        except Exception as e:
+            print(f"[Actor] LLM call failed ({e}), applying critic recommendations.")
+            recommended["max_steps"] = cfg["training"]["max_steps"]
+            cfg = {"training": recommended}
+
+    iter_config_path = config_path.replace(".yaml", f"_iter_{state['iteration']:02d}.yaml")
+    config_dir = os.path.dirname(config_path)
+    if config_dir:
+        os.makedirs(config_dir, exist_ok=True)
+    with open(config_path, "w") as f:
+        yaml.dump(cfg, f)
+    with open(iter_config_path, "w") as f:
+        yaml.dump(cfg, f)
+
+    run_gsplat_training(
+        data_dir=state["initial_point_cloud_path"],
+        output_dir=iteration_result_dir,
+        config_path=config_path,
+    )
+
+    return {**state, "current_iter_result_dir": iteration_result_dir}
+
+
+def critic_agent(state: State) -> State:
+    iter_result_dir = state.get("current_iter_result_dir", state["result_dir"])
+    print(f"[Critic Agent] Evaluating iteration {state['iteration']} from {iter_result_dir}...")
+    
+    metrics = extract_eval_metrics(iter_result_dir)
+    image_paths = get_render_images(iter_result_dir)
+
+    def _fmt(v, decimals=4):
+        if v is None:
+            return "N/A"
+        try:
+            return f"{float(v):.{decimals}f}"
+        except (TypeError, ValueError):
+            return str(v)
+
+    print(
+        f"[+] Metrics: PSNR={_fmt(metrics['psnr'], 3)}, "
+        f"SSIM={_fmt(metrics['ssim'], 4)}, "
+        f"LPIPS={_fmt(metrics['lpips'], 4)}, "
+        f"num_GS={metrics.get('num_gs', 'N/A')}"
+    )
+
+    image_paths = get_render_images(state["result_dir"])
+    print(f"[+] Found {len(image_paths)} render(s) for visual evaluation.")
+
+    if metrics.get("psnr") is not None:
+        metrics_str = (
+            f"PSNR: {_fmt(metrics['psnr'], 3)} dB (higher is better, target >27), "
+            f"SSIM: {_fmt(metrics['ssim'], 4)} (higher is better, target >0.85), "
+            f"LPIPS: {_fmt(metrics['lpips'], 4)} (lower is better, target <0.20), "
+            f"Gaussian count: {metrics.get('num_gs', 'N/A')}"
+        )
+    else:
+        metrics_str = (
+            f"Eval metrics not yet available. "
+            f"Training stats — Gaussian count: {metrics.get('num_gs', 'N/A')}, "
+            f"GPU mem: {_fmt(metrics.get('mem_gb'), 2)} GB, "
+            f"time per image: {_fmt(metrics.get('ellipse_time'), 2)}s"
+        )
+
+    with open(state["config_path"], "r") as f:
+        cfg = yaml.safe_load(f)
+    current_config_str = yaml.dump(cfg["training"])
+
+    history_str = format_metric_history(state.get("metric_history", []))
+
+    prompt = (
+        "You are an expert ML Critic specialising in 3D Gaussian Splatting (MCMC mode).\n"
+        "Training used MCMCStrategy with a hard cap of 500,000 Gaussians.\n"
+        "max_steps is fixed at 30000 — do NOT recommend changing it.\n\n"
+
+        "=== CURRENT TRAINING CONFIG ===\n"
+        f"{current_config_str}\n\n"
+
+        "=== METRICS THIS ITERATION ===\n"
+        f"{metrics_str}\n\n"
+
+        "=== METRIC HISTORY (most recent last) ===\n"
+        f"{history_str}\n\n"
+
+        "=== PARAMETER → SYMPTOM REFERENCE ===\n"
+        "  ssim_lambda : HIGH → sharper edges. LOW → better color accuracy.\n"
+        "    Symptom of too-low: soft/blurry edges despite enough Gaussians.\n"
+        "  opacity_reg : HIGH → reduces semi-transparent floaters.\n"
+        "    Symptom of too-low: haze or fog in empty regions of the scene.\n"
+        "  scale_reg   : HIGH → suppresses needle/streak artifacts.\n"
+        "    Symptom of too-low: elongated shard-like Gaussians on surfaces.\n\n"
+
+        "=== VISUAL INSPECTION CHECKLIST ===\n"
+        "1. Floaters / haze   — foggy blobs in empty space\n"
+        "2. Missing detail    — blurry or absent fine structures\n"
+        "3. Streak artifacts  — elongated needle-shaped Gaussians\n"
+        "4. Edge sharpness    — are silhouette edges crisp or soft?\n"
+        "5. Color fidelity    — do colors match a plausible real-world scene?\n\n"
+
+        "Reply in EXACTLY this format:\n"
+        "STATUS: ACCEPTED or REJECTED\n"
+        "OBSERVATIONS:\n"
+        "  floaters: <none|mild|severe>\n"
+        "  missing_detail: <none|mild|severe>\n"
+        "  streak_artifacts: <none|mild|severe>\n"
+        "  edge_sharpness: <sharp|soft>\n"
+        "  color_fidelity: <good|poor>\n"
+        "CRITIQUE: <one paragraph root-cause analysis>\n"
+        "RECOMMENDATIONS:\n"
+        "  ssim_lambda: <new value or 'keep'>\n"
+        "  opacity_reg: <new value or 'keep'>\n"
+        "  scale_reg: <new value or 'keep'>\n"
+    )
+
+    print(prompt)
+    if image_paths:
+        response = call_vlm(prompt, image_paths)
+    else:
+        print("[Critic] No render images found, falling back to metrics-only evaluation.")
+        response = call_llm(prompt)
+
+    approved = "STATUS: ACCEPTED" in response
+    print(f"[Critic]: {response}")
+
+    history = state.get("metric_history", [])
+    history.append(metrics)
+
+    return {
+        **state,
+        "feedback": response,
+        "approved": approved,
+        "metric_history": history,
+        "iteration": state["iteration"] + 1,
+    }
+
+
+def route(state: State) -> str:
+    if state["approved"] or state["iteration"] >= 3:
+        return "end"
+    return "actor_agent"
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="3D Gaussian Splatting Pipeline")
+    parser.add_argument(
+        "--mode",
+        type=int,
+        required=True,
+        choices=[0, 1],
+        help="0 for video, 1 for images",
+    )
+    args = parser.parse_args()
+
+    graph = StateGraph(State)
+    graph.add_node("prefiltering_agent", prefiltering_agent)
+    graph.add_node("actor_agent", actor_agent)
+    graph.add_node("critic_agent", critic_agent)
+
+    # skip prefiltering
+    #graph.set_entry_point("prefiltering_agent")
+    graph.set_entry_point("actor_agent")
+    #graph.add_edge("prefiltering_agent", "actor_agent")
+    graph.add_edge("actor_agent", "critic_agent")
+    graph.add_conditional_edges(
+        "critic_agent",
+        route,
+        {
+            "actor_agent": "actor_agent",
+            "end": END,
+        },
+    )
+
+    pipeline = graph.compile()
+
+    result = pipeline.invoke(
+        {
+            "feedback": "",
+            "approved": False,
+            "iteration": 0,
+            "video_path": "input/video.mp4",
+            "video_name": "video",
+            "initial_point_cloud_path": "output/video",
+            "config_path": "output/config.yaml",
+            "result_dir": "output/splat_results",
+            "current_iter_result_dir": "",
+            "input_mode": args.mode,
+            "metric_history": [],
+        }
+    )
+
+    exit(0)
+    print("\n[+] Launching interactive viewer for final output...")
+    colmap_out_dir = f"output/{result['video_name']}"
+    pcd = o3d.io.read_point_cloud(f"{colmap_out_dir}/sparse.ply")
+    o3d.visualization.draw_geometries([pcd])
