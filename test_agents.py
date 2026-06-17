@@ -62,6 +62,7 @@ class State(TypedDict):
     config_path: str
     result_dir: str
     input_mode: int
+    dsmlp: bool
     skip_preprocessing: bool
 
 
@@ -406,6 +407,7 @@ def images_to_point_cloud(
     match_method="exhaustive",
     dense=False,
     use_gpu=True,
+    dsmlp=False,
 ):
     image_dir = pathlib.Path(image_dir)
     output_dir = pathlib.Path(output_dir)
@@ -613,23 +615,23 @@ def prefiltering_agent(state: State) -> State:
         }
 
     if state["input_mode"] == 0:
-        """
-        extract_frames(state["video_path"], image_dir, cuda=(not dsmlp))
+        extract_frames(state["video_path"], image_dir, cuda=(not state["dsmlp"]))
         images_to_point_cloud(
             image_dir=image_dir,
             output_dir=output_dir,
             match_method="sequential",
             dense=False,
-            use_gpu=(not dsmlp),
+            use_gpu=(not state["dsmlp"]),
+            dsmlp=state["dsmlp"],
         )
-        """
     else:
         images_to_point_cloud(
             image_dir=image_dir,
             output_dir=output_dir,
             match_method="sequential",
             dense=False,
-            use_gpu=(not dsmlp),
+            use_gpu=(not state["dsmlp"]),
+            dsmlp=state["dsmlp"],
         )
 
     return {
@@ -840,9 +842,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    global dsmlp
-    dsmlp = args.dsmlp
-
     graph = StateGraph(State)
     graph.add_node("prefiltering_agent", prefiltering_agent)
     graph.add_node("actor_agent", actor_agent)
@@ -873,6 +872,7 @@ if __name__ == "__main__":
             "config_path": "output/config.yaml",
             "result_dir": "output/splat_results",
             "input_mode": args.mode,
+            "dsmlp": args.dsmlp,
             "skip_preprocessing": args.skip_preprocessing,
         }
     )
