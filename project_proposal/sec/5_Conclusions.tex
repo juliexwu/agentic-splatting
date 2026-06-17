@@ -1,0 +1,18 @@
+\section{Conclusion}
+\label{sec:expected_outcomes}
+
+\noindent We have created an end-to-end agentic pipeline for 3DGS training that takes in a video showing multiple views of a static scene and produces a high quality 3DGS representation. At the core of our framework, an Actor and Critic agent work together to optimize a GS training configuration. The Actor proposes and applies hyperparameter settings while the Critic evaluates the renders and guides the iterative refinement. In a high-level view, the agents assume the role of a machine learning engineer, automating the otherwise tedious, manual process of tuning individual training hyperparameters and removing the need for a human in the loop. Although our pipeline was not able to converge with the Critic accepting the output, our experimentation has shown the effectiveness in iteratively improving reconstruction quality, achieving an average PSNR gain of 0.5155 db over the initial configuration.\\
+
+\subsection{Limitations}
+\noindent First, all experiments were conducted on either DSMLP machines or a single RTX 4090 GPU. On the single RTX 4090 GPU, one 3DGS training run of 30,000 steps would take roughly 20 minutes, limiting the number and scale of our experiments we were able to run. Second, due to API cost constraints, we restricted our Actor and Critic agents to Gemma models. While these models were sufficient to demonstrate the viability of our approach, stronger VLMs such as GPT-4o as a Critic may provide more accurate critiques and configuration changes, possibly providing higher-quality reconstructions. Additionally, we sometimes encountered 500 Internal Server Errors when calling the Google AI Studio APIs, leading us to use a second Gemma model as a fallback model. In the event that both models fail, our pipeline currently retrains the Gaussians with the same configuration parameters as the previous agentic loop.\\
+
+\subsection{Extensions}
+\noindent Exploring a broader range of LLMs and VLMs for Actor and Critic is a promising direction in improving the GS training configuration refinement. Furthermore, as our current framework relies on gsplat’s training scripts, a natural extension would be to utilize alternative or newer 3DGS libraries, allowing the framework to keep up with newer reconstruction methods.\\
+
+\subsection{Contributions}
+\begin{itemize}
+    \item \textbf{Evan Cheng:} Collaborated to set up  and test the initial agentic pipeline on DSMLP. Modified initial agentic pipeline to MCMC strategy with capped Gaussians, capped training steps, bounded hyperparameters, and metric history in prompts. Ran experiments with MCMC strategy.
+    \item \textbf{Samar Karanch:}  Implemented pre-filitering process including frame extraction and COLMAP output. Created LangChain agentic structure and ran initial results. Wrote methods overview and implementation details in the report.
+    \item \textbf{Nora Tseng:} Set up the initial agentic pipeline and connected to the gsplat tool. Generated and wrote initial results and conclusions in the report.
+    \item \textbf{Julie Wu:} Modified gsplat default strategy to have a loose cap on the number of Gaussians. Added error handling capabilities to the main pipeline. Ran experiments with different parameters and prompts to enforce semi-fixed memory/compute budget. Wrote implementation details in the repo.\\
+\end{itemize}

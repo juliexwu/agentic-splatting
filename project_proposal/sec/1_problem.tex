@@ -1,5 +1,8 @@
-\section{Problem}
-\label{sec:problem}
+\section{Introduction}
+\label{sec:introduction}
 
+\subsection{Problem}
 3D gaussian splatting (GS) is a volumetric rendering technique for reconstructing 3D scenes, requiring extensive training and optimization to achieve state-of-the-art visual quality. Tuning hyperparameters, supervising training, inspecting results, and making changes requires specialized knowledge and is a long, iterative process.
 
+\subsection{Motivation}
+To address the difficulty in optimizing 3D GS reconstructions, we automated the process of tuning training hyperparameters for 3D GS by employing Vision-Language Models (VLMs). Specifically, we implemented a multi-agent pipeline with Actor and Critic AI agents to iteratively execute, evaluate, and correct configurations for training 3D GS. Our pipeline starts by processing videos into image frames or taking image inputs. Then, it uses the images to generate the point cloud as well as any other files necessary to initialize GS. The actor and critic VLM agents reconstruct the 3D scenes with Gaussian primitives, rasterize novel views, and provide feedback for training configuration to produce high fidelity reconstructions.
