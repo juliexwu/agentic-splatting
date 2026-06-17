@@ -8,6 +8,9 @@ import subprocess
 import yaml
 import argparse
 import torch
+import json
+import requests
+from requests.exceptions import HTTPError
 
 from PIL import Image
 from gsplat.rendering import rasterization
@@ -44,17 +47,9 @@ class TrainingConfig(BaseModel):
     # lr_delay_mult: float
 
     densify_grad_threshold: float
-    # densify_from_step: int
-    densify_until_step: int
-    # densification_interval: int
+    opacity_cull_threshold: float
     densify_size_threshold: float
     max_num_gaussians: int
-
-
-# class TrainingConfig(BaseModel):
-#     max_steps: int
-#     densify_grad_threshold: float
-#     opacity_cull_threshold: float
 
 
 class State(TypedDict):
@@ -70,11 +65,31 @@ class State(TypedDict):
     skip_preprocessing: bool
 
 
-def call_llm(prompt: str) -> str:
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-    )
+def call_llm(prompt: str, actor=True) -> str:
+    if actor:
+        cfg = {
+            "response_mime_type": "application/json",
+            "response_schema": TrainingConfig,
+        }
+    else:
+        cfg = None
+
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=cfg
+        )
+    except:
+        print("Main LLM failed, using fallback model...")
+        response = client.models.generate_content(
+            model=GEMINI_FALLBACK,
+            contents=prompt,
+            config=cfg
+        )
+
+    if actor:
+        return response
 
     return response.text.strip()
 
@@ -470,8 +485,12 @@ def run_gsplat_training(data_dir, output_dir, config_path):
         str(max_steps),
         "--eval_steps",
         str(max_steps),
+        "--strategy.cap_max",
+        str(min(cfg["training"]["max_num_gaussians"], 1000000)),
         "--strategy.grow_grad2d",
         str(cfg["training"]["densify_grad_threshold"]),
+        "--strategy.grow_scale2d",
+        str(cfg["training"]["densify_size_threshold"]),
         "--strategy.prune_opa",
         str(cfg["training"]["opacity_cull_threshold"]),
         "--strategy.refine_stop_iter",
@@ -594,6 +613,7 @@ def prefiltering_agent(state: State) -> State:
         }
 
     if state["input_mode"] == 0:
+        """
         extract_frames(state["video_path"], image_dir, cuda=(not dsmlp))
         images_to_point_cloud(
             image_dir=image_dir,
@@ -602,6 +622,7 @@ def prefiltering_agent(state: State) -> State:
             dense=False,
             use_gpu=(not dsmlp),
         )
+        """
     else:
         images_to_point_cloud(
             image_dir=image_dir,
@@ -643,7 +664,15 @@ def actor_agent(state: State) -> State:
     )
 
     if state["iteration"] == 0 or not os.path.exists(config_path):
-        cfg = {"training": DEFAULT_TRAINING_CONFIG.model_dump()}
+        cfg = {
+            "training": {
+                "max_steps": 2000,
+                "densify_grad_threshold": 0.0002,
+                "opacity_cull_threshold": 0.005,
+                "densify_size_threshold": 0.05,
+                "max_num_gaussians": 500000,
+            }
+        }
     else:
         with open(config_path, "r") as f:
             cfg = yaml.safe_load(f)
@@ -655,26 +684,36 @@ def actor_agent(state: State) -> State:
             f"{state['feedback']}\n\n"
             "Current training config:\n"
             f"{current_config_str}\n"
-            "Return updated hyperparameters in .json format to address the critique."
+            "Return updated hyperparameters in .json format to address the critique.\n"
+            "Do not increase max_steps past 50,000, and only increase it in smaller increments if necessary.\n"
+            "Do not increase max_num_gaussians past 1,000,000, and only increase it in smaller increments if necessary.\n"
         )
         print(prompt)
 
         try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config={
-                    "response_mime_type": "application/json",
-                    "response_schema": TrainingConfig,
-                },
-            )
+            response = call_llm(prompt)
             print(response)
-            parsed = response.parsed
-            print(parsed)
-            cfg = {"training": parsed.model_dump()}
+            if response.parsed:
+                parsed = response.parsed
+                print(parsed)
+            else:
+                # common parsing failure mode is extra quotes at start and end
+                resp = ['candidates'][0]['content']['parts'][0]['text']
+                resp = "{" + resp.split("{", 1)[1].split("}", 1)[0] + "}"
+                parsed = json.loads(resp)
+                print(parsed)
+
+            cfg = {
+                "training": {
+                    "max_steps": parsed.max_steps,
+                    "densify_grad_threshold": parsed.densify_grad_threshold,
+                    "opacity_cull_threshold": parsed.opacity_cull_threshold,
+                    "densify_size_threshold": parsed.densify_size_threshold,
+                    "max_num_gaussians": parsed.max_num_gaussians,
+                }
+            }
             print(f"[Actor] Updated config: {cfg['training']}")
         except Exception as e:
-            print(response)
             print(f"[Actor] Structured output failed ({e}), keeping current config.")
 
     config_dir = os.path.dirname(config_path)
@@ -764,7 +803,7 @@ def critic_agent(state: State) -> State:
         print(
             "[Critic] No render images found, falling back to metrics-only evaluation."
         )
-        response = call_llm(prompt)
+        response = call_llm(prompt, actor=False)
 
     approved = "STATUS: ACCEPTED" in response
     print(f"[Critic]: {response}")
