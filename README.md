@@ -79,12 +79,12 @@ cd gsplat && pip install . --no-build-isolation --no-cache-dir
 cd ..
 ```
 
-A custom implementation of `agentic-splatting/gsplat/gsplat/strategy/default.py` is located at `default_custom.py`. In order to use the custom implementation, copy-paste teh contents of `default_custom.py` into `agentic-splatting/gsplat/gsplat/strategy/default.py`.
-
 On DSMLP, the second line may need to be replaced with:
 ```bash
 cd gsplat && python3.10 -m pip install . --no-build-isolation --no-cache-dir
 ```
+
+> **NOTE:** A custom implementation of `agentic-splatting/gsplat/gsplat/strategy/default.py` is located at `default_custom.py`. In order to use the custom implementation, copy-paste the contents of `default_custom.py` into `agentic-splatting/gsplat/gsplat/strategy/default.py`.
 
 Verify the build succeeded:
 
@@ -100,7 +100,7 @@ Note: requirements.txt is for cu12 which is compatible with cu12.x
 pip install --no-build-isolation -r requirements.txt
 ```
 
-On DSMLP, this worked better instead:
+On DSMLP, this worked better instead. Alternatively, `environment_dsmlp.yml` contains a working environment for DSMLP too.
 ```bash
 python3.10 -m pip install --no-build-isolation -r requirements_dsmlp.txt
 
