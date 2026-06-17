@@ -78,6 +78,9 @@ git clone https://github.com/nytseng/gsplat.git # fork bc update to pycolmap Sce
 cd gsplat && pip install . --no-build-isolation --no-cache-dir
 cd ..
 ```
+
+A custom implementation of `agentic-splatting/gsplat/gsplat/strategy/default.py` is located at `default_custom.py`. In order to use the custom implementation, copy-paste teh contents of `default_custom.py` into `agentic-splatting/gsplat/gsplat/strategy/default.py`.
+
 On DSMLP, the second line may need to be replaced with:
 ```bash
 cd gsplat && python3.10 -m pip install . --no-build-isolation --no-cache-dir
